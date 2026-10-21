@@ -16,6 +16,8 @@ class Candidate:
     bid: float
     ask: float
     delta: float | None
+    open_interest: int = 0
+    iv: float | None = None
 
     @property
     def mid(self):
@@ -25,30 +27,31 @@ class Candidate:
     def spread_pct(self):
         return (self.ask - self.bid) / self.mid if self.mid > 0 else 1.0
 
+    @property
+    def dte(self):
+        return (self.expiration - date.today()).days
 
-def _list_contracts(trading_client, underlying, kind, price, settings):
+
+def quote_contracts(trading_client, option_client, underlying, kind, price,
+                    min_dte, max_dte, strike_band=0.10, min_open_interest=0, max_spread_pct=1.0):
+    """All tradable contracts in the expiry/strike window that have a two-sided quote."""
     today = date.today()
     req = GetOptionContractsRequest(
         underlying_symbols=[underlying],
         status=AssetStatus.ACTIVE,
         type=ContractType.CALL if kind == "call" else ContractType.PUT,
-        expiration_date_gte=today + timedelta(days=settings.min_dte),
-        expiration_date_lte=today + timedelta(days=settings.max_dte),
-        strike_price_gte=str(round(price * 0.90, 2)),
-        strike_price_lte=str(round(price * 1.10, 2)),
-        limit=500,
+        expiration_date_gte=today + timedelta(days=min_dte),
+        expiration_date_lte=today + timedelta(days=max_dte),
+        strike_price_gte=str(round(price * (1 - strike_band), 2)),
+        strike_price_lte=str(round(price * (1 + strike_band), 2)),
+        limit=1000,
     )
-    contracts = trading_client.get_option_contracts(req).option_contracts or []
-    return [
-        c for c in contracts
-        if c.tradable and int(c.open_interest or 0) >= settings.min_open_interest
+    contracts = [
+        c for c in (trading_client.get_option_contracts(req).option_contracts or [])
+        if c.tradable and int(c.open_interest or 0) >= min_open_interest
     ]
-
-
-def pick_contract(trading_client, option_client, underlying, kind, price, settings):
-    contracts = _list_contracts(trading_client, underlying, kind, price, settings)
     if not contracts:
-        return None, "no contracts matched expiry/strike/open-interest filters"
+        return []
 
     by_symbol = {c.symbol: c for c in contracts}
     symbols = list(by_symbol)
@@ -57,19 +60,28 @@ def pick_contract(trading_client, option_client, underlying, kind, price, settin
         req = OptionSnapshotRequest(symbol_or_symbols=symbols[i:i + 100], feed=OptionsFeed.INDICATIVE)
         snapshots.update(option_client.get_option_snapshot(req))
 
-    candidates = []
+    out = []
     for sym, snap in snapshots.items():
         q = snap.latest_quote
         if not q or not q.bid_price or not q.ask_price:
             continue
         c = by_symbol[sym]
-        delta = snap.greeks.delta if snap.greeks else None
-        cand = Candidate(sym, float(c.strike_price), c.expiration_date, float(q.bid_price), float(q.ask_price), delta)
-        if cand.spread_pct <= settings.max_spread_pct:
-            candidates.append(cand)
+        cand = Candidate(
+            sym, float(c.strike_price), c.expiration_date, float(q.bid_price), float(q.ask_price),
+            snap.greeks.delta if snap.greeks else None, int(c.open_interest or 0), snap.implied_volatility,
+        )
+        if cand.spread_pct <= max_spread_pct:
+            out.append(cand)
+    return sorted(out, key=lambda c: (c.expiration, c.strike))
 
+
+def pick_contract(trading_client, option_client, underlying, kind, price, settings):
+    candidates = quote_contracts(
+        trading_client, option_client, underlying, kind, price,
+        settings.min_dte, settings.max_dte, 0.10, settings.min_open_interest, settings.max_spread_pct,
+    )
     if not candidates:
-        return None, "no contracts with a tight enough bid/ask spread"
+        return None, "no liquid contracts matched expiry/strike/open-interest/spread filters"
 
     def score(c):
         # Prefer closest to target delta; fall back to strike distance if greeks are missing.
