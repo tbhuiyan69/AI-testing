@@ -13,3 +13,6 @@ venv/
 # OS
 Thumbs.db
 .DS_Store
+
+# Bot output
+logs/

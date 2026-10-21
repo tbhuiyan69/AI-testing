@@ -2,7 +2,7 @@
   "mcpServers": {
     "alpaca": {
       "command": "C:\\Users\\tbhui\\AppData\\Roaming\\Python\\Python312\\Scripts\\uvx.exe",
-      "args": ["alpaca-mcp-server", "serve"],
+      "args": ["alpaca-mcp-server"],
       "env": {
         "ALPACA_API_KEY": "${ALPACA_API_KEY}",
         "ALPACA_SECRET_KEY": "${ALPACA_SECRET_KEY}",
