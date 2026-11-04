@@ -3,6 +3,7 @@ import csv
 import logging
 import math
 import re
+import time
 from datetime import date, datetime
 from pathlib import Path
 
@@ -70,16 +71,25 @@ class Broker:
             return
         self._submit(cand.symbol, qty, OrderSide.BUY, limit, reason)
 
+    def _cancel_open_orders(self, symbol):
+        """An unfilled order holds the contracts, which would block any new exit on them."""
+        if not self.live_orders:
+            return
+        orders = self.trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol]))
+        for order in orders:
+            self.trading.cancel_order_by_id(order.id)
+        if orders:
+            time.sleep(1)  # cancels are asynchronous; give the contracts time to free up
+
     def close_now(self, position, reason):
-        """Close at market, cancelling any open order that is holding the contracts."""
-        if self.live_orders:
-            req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[position.symbol])
-            for order in self.trading.get_orders(req):
-                self.trading.cancel_order_by_id(order.id)
+        """Close at market."""
+        self._cancel_open_orders(position.symbol)
         self._submit(position.symbol, int(float(position.qty)), OrderSide.SELL, None, reason)
 
     def sell(self, position, reason):
-        qty = int(float(position.qty_available or position.qty))
+        """Sell at the current price, replacing any earlier unfilled order."""
+        self._cancel_open_orders(position.symbol)
+        qty = int(float(position.qty))
         if qty < 1:
             return
         price = float(position.current_price or 0)

@@ -16,6 +16,19 @@ def dte_exit(symbol, s):
     return f"time exit, {dte} DTE" if dte is not None and dte <= s.exit_dte else None
 
 
+def pct_take_profit(p, s):
+    plpc = float(p.unrealized_plpc or 0)
+    return f"take profit {plpc:+.0%}" if plpc >= s.take_profit_pct else None
+
+
+def quick_take_profit(p, s):
+    """Take profit on more than the dollar target or more than the percent target, whichever comes first."""
+    pl, plpc = float(p.unrealized_pl or 0), float(p.unrealized_plpc or 0)
+    if pl > s.quick_profit_dollars or plpc > s.quick_profit_pct:
+        return f"take profit ${pl:+.2f} ({plpc:+.1%})"
+    return None
+
+
 def sma_signal(broker, symbol, s):
     kind, price = signal_for(broker.stocks, symbol, s)
     return kind, price, f"{symbol} SMA{s.fast_sma}/{s.slow_sma} cross -> {kind}"
@@ -28,11 +41,12 @@ class Strategy:
     time_exit: Callable
     time_exit_at_market: bool = False
     show_blocked: bool = False
+    take_profit: Callable = pct_take_profit
 
 
 SMA = Strategy(sma_signal, pick_contract, dte_exit)
 PRICE_ACTION = Strategy(price_action_signal, pick_capped_contract, expiry_day_exit,
-                        time_exit_at_market=True, show_blocked=True)
+                        time_exit_at_market=True, show_blocked=True, take_profit=quick_take_profit)
 
 
 def manage_exits(broker, s, strategy):
@@ -40,10 +54,11 @@ def manage_exits(broker, s, strategy):
         plpc = float(p.unrealized_plpc or 0)
         dte = days_to_expiry(p.symbol)
         time_exit = strategy.time_exit(p.symbol, s)
+        take_profit = strategy.take_profit(p, s)
         if time_exit and strategy.time_exit_at_market:
             broker.close_now(p, time_exit)
-        elif plpc >= s.take_profit_pct:
-            broker.sell(p, f"take profit {plpc:+.0%}")
+        elif take_profit:
+            broker.sell(p, take_profit)
         elif plpc <= -s.stop_loss_pct:
             broker.sell(p, f"stop loss {plpc:+.0%}")
         elif time_exit:

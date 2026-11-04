@@ -12,6 +12,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from options_bot import bot, contracts, price_action as pa
+from options_bot.broker import Broker
 from options_bot.contracts import Candidate, premium_cap, within_premium_cap
 from options_bot.price_action import detect, momentum_confirms, pivots
 from price_action_use_cases import CASES
@@ -159,7 +160,7 @@ class Gates(unittest.TestCase):
         with (patch.object(pa, "fetch_5m", return_value=df),
               patch.object(pa, "pc_ratio", return_value=ratio),
               patch.object(pa, "momentum_confirms", return_value=momentum)):
-            return pa.price_action_signal(FakeBroker(live), "AAA", SimpleNamespace(min_dte=21, max_dte=45))
+            return pa.price_action_signal(FakeBroker(live), "AAA", SimpleNamespace(poll_minutes=15))
 
     def test_all_agree_gives_a_put(self):
         kind, _, reason = self.signal()
@@ -195,6 +196,85 @@ class Gates(unittest.TestCase):
         )
         bot.look_for_entries(broker, s, strategy)
         self.assertEqual(broker.bought, [(cand, "QM Quick Retest put, stop 252.20, P/C 2.00, delta -0.40")])
+
+
+class FifteenMinuteChecks(unittest.TestCase):
+    def quiet_bars_after(self, df, count):
+        last = df.iloc[-1]
+        rows = pd.DataFrame([[last.close, last.close + 0.01, last.close - 0.01, last.close]] * count, columns=df.columns,
+                            index=pd.date_range(df.index[-1] + pd.Timedelta(minutes=5), periods=count, freq="5min"))
+        return pd.concat([df, rows])
+
+    def test_finds_a_setup_from_up_to_two_bars_ago(self):
+        for count in (0, 1, 2):
+            with self.subTest(count):
+                df = self.quiet_bars_after(SCENARIOS["QM Quick Retest"], count)
+                self.assertEqual(pa.recent_setup(df, 3).pattern, "QM Quick Retest")
+
+    def test_ignores_a_setup_from_before_the_last_check(self):
+        df = self.quiet_bars_after(SCENARIOS["QM Quick Retest"], 3)
+        self.assertIsNone(pa.recent_setup(df, 3))
+
+    def test_short_interval_still_checks_the_latest_bar(self):
+        self.assertIsNotNone(pa.recent_setup(SCENARIOS["QM Quick Retest"], 0))
+
+
+def position(pl, plpc, symbol="AAPL261120P00335000", qty="2"):
+    return SimpleNamespace(symbol=symbol, unrealized_pl=str(pl), unrealized_plpc=str(plpc), qty=qty,
+                           qty_available="0", current_price="1.25")
+
+
+class QuickTakeProfit(unittest.TestCase):
+    s = SimpleNamespace(quick_profit_dollars=10.0, quick_profit_pct=0.03, take_profit_pct=0.50, stop_loss_pct=0.35)
+
+    def test_more_than_either_target_takes_profit(self):
+        for pl, plpc in [(10.01, 0.01), (1.00, 0.031), (50.00, 0.20)]:
+            with self.subTest(pl=pl, plpc=plpc):
+                self.assertIn("take profit", bot.quick_take_profit(position(pl, plpc), self.s))
+
+    def test_at_or_below_both_targets_holds(self):
+        for pl, plpc in [(10.00, 0.03), (0, 0), (-5, -0.02)]:
+            with self.subTest(pl=pl, plpc=plpc):
+                self.assertIsNone(bot.quick_take_profit(position(pl, plpc), self.s))
+
+    def run_exits(self, strategy, p):
+        sold = []
+        broker = SimpleNamespace(option_positions=lambda: [p], sell=lambda _, why: sold.append(why))
+        bot.manage_exits(broker, self.s, strategy)
+        return sold
+
+    def test_price_action_sells_at_the_quick_target(self):
+        sold = self.run_exits(bot.PRICE_ACTION, position(12.00, 0.02))
+        self.assertEqual(sold, ["take profit $+12.00 (+2.0%)"])
+
+    def test_sma_strategy_still_waits_for_fifty_percent(self):
+        s = SimpleNamespace(**vars(self.s), exit_dte=7)
+        sold = []
+        broker = SimpleNamespace(option_positions=lambda: [position(12.00, 0.02)], sell=lambda _, why: sold.append(why))
+        bot.manage_exits(broker, s, bot.SMA)
+        self.assertEqual(sold, [])
+
+
+class ReplacingSells(unittest.TestCase):
+    def broker(self, live, open_orders):
+        calls = []
+        b = Broker.__new__(Broker)
+        b.live_orders = live
+        b.trading = SimpleNamespace(get_orders=lambda _: open_orders,
+                                    cancel_order_by_id=lambda order_id: calls.append(("cancel", order_id)))
+        b._submit = lambda sym, qty, side, limit, why: calls.append(("submit", sym, qty, limit, why))
+        return b, calls
+
+    def test_unfilled_sell_is_cancelled_and_replaced_even_with_no_qty_available(self):
+        b, calls = self.broker(True, [SimpleNamespace(id="old")])
+        with patch("options_bot.broker.time.sleep"):
+            b.sell(position(-300, -0.40), "stop loss -40%")
+        self.assertEqual(calls, [("cancel", "old"), ("submit", "AAPL261120P00335000", 2, 1.25, "stop loss -40%")])
+
+    def test_dry_run_cancels_nothing(self):
+        b, calls = self.broker(False, [SimpleNamespace(id="old")])
+        b.sell(position(12, 0.02), "take profit")
+        self.assertEqual([c[0] for c in calls], ["submit"])
 
 
 def candidate(dte, mid, delta=-0.30):
@@ -286,11 +366,11 @@ class SameDayTiming(unittest.TestCase):
 
     def test_time_exit_uses_a_market_close_ahead_of_profit_rules(self):
         closed, sold = [], []
-        position = SimpleNamespace(symbol=self.occ(0), unrealized_plpc="0.90")
+        position = SimpleNamespace(symbol=self.occ(0), unrealized_plpc="0.90", unrealized_pl="90")
         broker = SimpleNamespace(option_positions=lambda: [position],
                                  close_now=lambda p, why: closed.append(why),
                                  sell=lambda p, why: sold.append(why))
-        s = SimpleNamespace(take_profit_pct=0.50, stop_loss_pct=0.35)
+        s = QuickTakeProfit.s
         with patch.object(pd.Timestamp, "now", return_value=eastern(15, 20)):
             bot.manage_exits(broker, s, bot.PRICE_ACTION)
         self.assertEqual((closed, sold), (["expiry-day exit"], []))

@@ -15,7 +15,6 @@ from pathlib import Path
 from options_bot.bot import PRICE_ACTION, SMA, run_cycle
 from options_bot.broker import Broker
 from options_bot.config import Settings
-from options_bot.price_action import BAR_MINUTES
 
 
 def setup_logging():
@@ -27,9 +26,9 @@ def setup_logging():
     )
 
 
-def sleep_until_next_bar():
-    """Wake just after the next 5m bar closes, so no bar is skipped by drift."""
-    period = BAR_MINUTES * 60
+def sleep_until_next_check(minutes):
+    """Wake just after the next clock boundary (:00, :15, ...), so bars don't drift out of step."""
+    period = minutes * 60
     time.sleep(period - time.time() % period + 15)
 
 
@@ -71,7 +70,7 @@ def main():
         except Exception:
             log.exception("Cycle failed; will retry next interval.")
         if price_action:
-            sleep_until_next_bar()
+            sleep_until_next_check(s.poll_minutes)
         else:
             time.sleep(s.poll_minutes * 60)
 
