@@ -1,6 +1,6 @@
 """Scan stocks with the EMA 9/21 + RSI + MACD 15-minute setup (ema_rsi_macd_setup_spec.md).
 
-    python scan.py                          # scan the default universe
+    python scan.py                          # scan the Claude_scanner tickers
     python scan.py --symbols QS,IREN,AAPL   # scan your own list
     python scan.py --puts                   # also list put contracts for bearish setups
     python scan.py --puts --min-dte 7 --max-dte 30
@@ -13,17 +13,9 @@ from datetime import datetime
 from pathlib import Path
 
 from options_bot.broker import Broker
-from options_bot.config import Settings
+from options_bot.config import SCANNER_SYMBOLS, Settings
 from options_bot.contracts import quote_contracts
 from options_bot.ema_rsi_macd import BEARISH_STATES, BULLISH_STATES, evaluate, fetch_15m
-
-DEFAULT_UNIVERSE = [
-    "SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA",
-    "AMD", "AVGO", "NFLX", "CRM", "ORCL", "ADBE", "INTC", "MU", "QCOM", "SMCI",
-    "PLTR", "COIN", "MSTR", "HOOD", "SOFI", "UBER", "SHOP", "SNOW", "CRWD", "PANW",
-    "JPM", "BAC", "GS", "XOM", "CVX", "BA", "DIS", "NKE", "WMT", "COST",
-    "QS", "IREN", "RIVN", "MARA", "RIOT", "CRWV", "ARM", "TSM", "BABA", "SOXL",
-]
 
 ORDER = ["RECLAIM", "BREAKOUT", "PULLBACK", "TRENDING", "BASE", "NEUTRAL",
          "REJECT", "BREAKDOWN", "RALLY", "BROKEN", "BEARISH"]
@@ -63,7 +55,7 @@ def print_puts(broker, sym, r, a):
 
 def main():
     ap = argparse.ArgumentParser(description="EMA/RSI/MACD 15m setup scanner")
-    ap.add_argument("--symbols", help="comma-separated tickers (default: built-in universe)")
+    ap.add_argument("--symbols", help="comma-separated tickers (default: Claude_scanner tickers)")
     ap.add_argument("--all", action="store_true", help="show every symbol, not just ones in a setup state")
     ap.add_argument("--puts", action="store_true", help="list put contracts for bearish-state symbols")
     ap.add_argument("--puts-for", help="list puts for these tickers regardless of state")
@@ -79,7 +71,7 @@ def main():
     s = Settings()
     s.validate()
     broker = Broker(s, live_orders=False)
-    universe = [x.strip().upper() for x in a.symbols.split(",")] if a.symbols else DEFAULT_UNIVERSE
+    universe = [x.strip().upper() for x in a.symbols.split(",")] if a.symbols else SCANNER_SYMBOLS
 
     bars = fetch_15m(broker.stocks, universe)
     results = []

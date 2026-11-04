@@ -10,6 +10,14 @@ except ImportError:
     pass
 
 
+# Stock tickers from the Robinhood "Claude_scanner" watchlist. Its SPX and MGTN indexes are left out
+# because they have no stock bars or stock options to trade here.
+SCANNER_SYMBOLS = [
+    "NBIS", "APLD", "CRWV", "QMCO", "KO", "AMZN", "META", "AMD", "QCOM",
+    "NVDA", "TSLA", "HIMS", "SOFI", "AAPL", "IREN", "XOM", "QQQ", "SPY",
+]
+
+
 def _env(name, default, cast=str):
     raw = os.getenv(name)
     return default if raw is None or raw == "" else cast(raw)
@@ -30,7 +38,7 @@ class Settings:
     paper: bool = field(default_factory=lambda: _env("ALPACA_PAPER_TRADE", True, _bool))
 
     # Universe and signal
-    watchlist: list = field(default_factory=lambda: _env("BOT_WATCHLIST", ["SPY", "QQQ", "AAPL", "MSFT", "NVDA"], _list))
+    watchlist: list = field(default_factory=lambda: _env("BOT_WATCHLIST", SCANNER_SYMBOLS, _list))
     fast_sma: int = field(default_factory=lambda: _env("BOT_FAST_SMA", 10, int))
     slow_sma: int = field(default_factory=lambda: _env("BOT_SLOW_SMA", 30, int))
 
