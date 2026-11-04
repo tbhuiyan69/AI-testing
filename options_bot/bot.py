@@ -22,7 +22,12 @@ def manage_exits(broker, s):
             log.info("HOLD %s  P/L %+.0f%%  %s DTE", p.symbol, plpc * 100, dte)
 
 
-def look_for_entries(broker, s):
+def sma_signal(broker, symbol, s):
+    kind, price = signal_for(broker.stocks, symbol, s)
+    return kind, price, f"{symbol} SMA{s.fast_sma}/{s.slow_sma} cross -> {kind}"
+
+
+def look_for_entries(broker, s, signal=sma_signal):
     if broker.daily_loss_hit():
         log.warning("Daily loss limit (%.0f%%) hit; no new entries today.", s.daily_loss_limit_pct * 100)
         return
@@ -36,12 +41,13 @@ def look_for_entries(broker, s):
         if symbol in busy:
             continue
         try:
-            kind, price = signal_for(broker.stocks, symbol, s)
+            kind, price, reason = signal(broker, symbol, s)
         except Exception as e:  # keep one bad symbol from killing the cycle
             log.warning("%s: could not compute signal (%s)", symbol, e)
             continue
         if not kind:
-            log.info("%s: no signal (last %.2f)", symbol, price or 0)
+            detail = f" [{reason}]" if reason and signal is not sma_signal else ""
+            log.info("%s: no signal (last %.2f)%s", symbol, price or 0, detail)
             continue
 
         cand, why = pick_contract(broker.trading, broker.options, symbol, kind, price, s)
@@ -49,10 +55,10 @@ def look_for_entries(broker, s):
             log.info("%s: %s signal but %s", symbol, kind, why)
             continue
         delta = f"{cand.delta:+.2f}" if cand.delta is not None else "n/a"
-        broker.buy(cand, f"{symbol} SMA{s.fast_sma}/{s.slow_sma} cross -> {kind}, delta {delta}")
+        broker.buy(cand, f"{reason}, delta {delta}")
         open_count += 1
 
 
-def run_cycle(broker, s):
+def run_cycle(broker, s, signal=sma_signal):
     manage_exits(broker, s)
-    look_for_entries(broker, s)
+    look_for_entries(broker, s, signal)

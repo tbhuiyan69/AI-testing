@@ -3,6 +3,8 @@
     python run_bot.py --once            # one cycle, dry-run (no orders)
     python run_bot.py                   # loop during market hours, dry-run
     python run_bot.py --trade           # loop and submit real PAPER orders
+    python run_bot.py --dry2            # price-action patterns on 5m bars, dry-run (no orders)
+    python run_bot.py --trade2          # price-action patterns, submit real PAPER orders
 """
 import argparse
 import logging
@@ -13,6 +15,7 @@ from pathlib import Path
 from options_bot.bot import run_cycle
 from options_bot.broker import Broker
 from options_bot.config import Settings
+from options_bot.price_action import BAR_MINUTES, price_action_signal
 
 
 def setup_logging():
@@ -24,9 +27,18 @@ def setup_logging():
     )
 
 
+def sleep_until_next_bar():
+    """Wake just after the next 5m bar closes, so no bar is skipped by drift."""
+    period = BAR_MINUTES * 60
+    time.sleep(period - time.time() % period + 15)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Alpaca paper-trading options bot")
-    ap.add_argument("--trade", action="store_true", help="submit orders to the paper account (default: dry-run)")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--trade", action="store_true", help="SMA strategy: submit orders to the paper account (default: dry-run)")
+    mode.add_argument("--trade2", action="store_true", help="price-action strategy: submit orders to the paper account")
+    mode.add_argument("--dry2", action="store_true", help="price-action strategy: log only, no orders")
     ap.add_argument("--once", action="store_true", help="run a single cycle, even if the market is closed")
     args = ap.parse_args()
 
@@ -34,28 +46,34 @@ def main():
     log = logging.getLogger("bot")
     s = Settings()
     s.validate()
-    broker = Broker(s, live_orders=args.trade)
+    live = args.trade or args.trade2
+    price_action = args.trade2 or args.dry2
+    broker = Broker(s, live_orders=live)
+    cycle_args = (price_action_signal,) if price_action else ()
 
     acct = broker.account()
-    log.info("Account %s  equity $%s  options BP $%s  mode=%s",
+    log.info("Account %s  equity $%s  options BP $%s  mode=%s  strategy=%s",
              acct.account_number, acct.equity, acct.options_buying_power,
-             "PAPER ORDERS" if args.trade else "DRY-RUN")
+             "PAPER ORDERS" if live else "DRY-RUN", "price-action" if price_action else "SMA")
 
     if args.once:
-        run_cycle(broker, s)
+        run_cycle(broker, s, *cycle_args)
         return
 
     while True:
         try:
             if broker.market_open():
-                run_cycle(broker, s)
+                run_cycle(broker, s, *cycle_args)
             else:
                 log.info("Market closed; waiting.")
         except KeyboardInterrupt:
             raise
         except Exception:
             log.exception("Cycle failed; will retry next interval.")
-        time.sleep(s.poll_minutes * 60)
+        if price_action:
+            sleep_until_next_bar()
+        else:
+            time.sleep(s.poll_minutes * 60)
 
 
 if __name__ == "__main__":

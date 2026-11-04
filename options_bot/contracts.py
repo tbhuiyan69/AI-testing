@@ -75,6 +75,30 @@ def quote_contracts(trading_client, option_client, underlying, kind, price,
     return sorted(out, key=lambda c: (c.expiration, c.strike))
 
 
+def pc_ratio(trading_client, underlying, price, min_dte, max_dte, strike_band=0.10):
+    """Put/call ratio from open interest in the expiry/strike window, or None if there is no call OI."""
+    today = date.today()
+    totals = {ContractType.CALL: 0, ContractType.PUT: 0}
+    token = None
+    while True:
+        resp = trading_client.get_option_contracts(GetOptionContractsRequest(
+            underlying_symbols=[underlying],
+            status=AssetStatus.ACTIVE,
+            expiration_date_gte=today + timedelta(days=min_dte),
+            expiration_date_lte=today + timedelta(days=max_dte),
+            strike_price_gte=str(round(price * (1 - strike_band), 2)),
+            strike_price_lte=str(round(price * (1 + strike_band), 2)),
+            limit=1000,
+            page_token=token,
+        ))
+        for c in resp.option_contracts or []:
+            totals[c.type] += int(c.open_interest or 0)
+        token = resp.next_page_token
+        if not token:
+            break
+    return totals[ContractType.PUT] / totals[ContractType.CALL] if totals[ContractType.CALL] else None
+
+
 def pick_contract(trading_client, option_client, underlying, kind, price, settings):
     candidates = quote_contracts(
         trading_client, option_client, underlying, kind, price,

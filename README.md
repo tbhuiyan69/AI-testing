@@ -10,6 +10,8 @@ pip install -r requirements.txt
 python run_bot.py --once     # one cycle, dry-run: logs what it would do, places nothing
 python run_bot.py            # loop every 15 min during market hours, dry-run
 python run_bot.py --trade    # loop and submit real paper orders
+python run_bot.py --dry2     # price-action strategy, log only
+python run_bot.py --trade2   # price-action strategy, submit real paper orders
 ```
 
 Logs go to `logs/bot.log`; every order (or dry-run order) is appended to `logs/trades.csv`.
@@ -24,6 +26,16 @@ Logs go to `logs/bot.log`; every order (or dry-run order) is appended to `logs/t
 3. **Guards**: max 3 open positions, no new entries after a 3% daily drawdown.
 
 All numbers are configurable; see `bot.env.example` (copy to `.env`).
+
+## Price-action strategy (`--dry2`, `--trade2`)
+
+Replaces the SMA signal; contract selection, sizing, exits and guards stay the same. Checked just after each 5-minute bar closes.
+
+1. **Pattern** (`options_bot/price_action.py`): one of the 10 in `price_action_use_cases.py` fires on the last closed bar. Puts use the bearish version, calls the mirror image.
+2. **Momentum**: RSI vs its 14-bar average and MACD vs signal agree on both 5m and 10m.
+3. **Flow**: put/call ratio above 1 backs a put, below 1 backs a call. It's computed from open interest in the bot's expiry/strike window.
+
+The pattern's stop level is logged with the order but not enforced; exits are still the option-based rules above. The detectors are one interpretation of written descriptions and have not been backtested.
 
 The SMA crossover is a placeholder to exercise the plumbing, not a tested edge.
 Swap in your own logic by editing `signal_for` in `options_bot/strategy.py`.
