@@ -6,7 +6,7 @@ none of it has been backtested. Each detector is written for the bearish (put) v
 bullish (call) version runs the same code on a flipped price series.
 """
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -14,7 +14,8 @@ from alpaca.data.enums import DataFeed
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
-from .contracts import pc_ratio
+from .broker import parse_occ
+from .contracts import MAX_CAPPED_DTE, pc_ratio
 from .ema_rsi_macd import ema, rsi_wilder
 
 BAR_MINUTES = 5
@@ -26,6 +27,8 @@ TOL_ATR = 0.25  # levels within this many ATRs count as the same level
 QM_ZONE = 0.30  # QM zone height, as a fraction of the H-to-HH distance
 QUICK_BARS = 6  # retests within this many bars of the LL are "quick"
 FLAG_LOW = 0.30  # flag low, as a fraction of the bounce (247.60 in the file's 247-249 flag)
+# From 3:30 PM ET on expiry day Alpaca may liquidate, and in-the-money options can auto-exercise.
+EXPIRY_EXIT_TIME = time(15, 15)
 
 
 @dataclass
@@ -301,6 +304,15 @@ def fetch_5m(stock_client, symbol, days=7):
     return df[df.index + pd.Timedelta(minutes=BAR_MINUTES) <= now]
 
 
+def expiry_day_exit(symbol, s):
+    """Reason to close a position that expires today, once it's late enough, else None."""
+    _, expiry = parse_occ(symbol)
+    now = pd.Timestamp.now("America/New_York")
+    if expiry and (expiry < now.date() or (expiry == now.date() and now.time() >= EXPIRY_EXIT_TIME)):
+        return "expiry-day exit"
+    return None
+
+
 def price_action_signal(broker, symbol, s):
     """Return (kind or None, last price, reason) using patterns, momentum and the put/call ratio."""
     df = fetch_5m(broker.stocks, symbol)
@@ -317,7 +329,7 @@ def price_action_signal(broker, symbol, s):
     label = f"{setup.pattern} {setup.kind}, stop {setup.stop:.2f}"
     if not momentum_confirms(df, setup.kind):
         return None, price, f"{label}, blocked: RSI/MACD disagree"
-    ratio = pc_ratio(broker.trading, symbol, price, s.min_dte, s.max_dte)
+    ratio = pc_ratio(broker.trading, symbol, price, 0, MAX_CAPPED_DTE)
     if ratio is None:
         return None, price, f"{label}, blocked: no put/call data"
     if (setup.kind == "put" and ratio <= 1) or (setup.kind == "call" and ratio >= 1):

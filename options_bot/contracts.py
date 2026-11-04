@@ -1,11 +1,22 @@
 """Pick a liquid option contract near the target delta."""
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, time, timedelta
+
+import pandas as pd
 
 from alpaca.data.enums import OptionsFeed
 from alpaca.data.requests import OptionSnapshotRequest
 from alpaca.trading.enums import AssetStatus, ContractType
 from alpaca.trading.requests import GetOptionContractsRequest
+
+from .broker import tick_round
+
+# Most you may pay per share, by days to expiry: same day under $0.80, up to 3 days $1.20, up to 5 days $1.50.
+PREMIUM_CAPS = ((0, 0.79), (3, 1.20), (5, 1.50))
+MAX_CAPPED_DTE = PREMIUM_CAPS[-1][0]
+MIN_DELTA = 0.15  # cheap contracts below this are unlikely to pay off; unknown delta doesn't pass
+# Alpaca stops accepting new orders on expiring contracts at 3:30 PM ET, so stop well before that.
+LAST_SAME_DAY_ENTRY = time(15, 0)
 
 
 @dataclass
@@ -107,10 +118,46 @@ def pick_contract(trading_client, option_client, underlying, kind, price, settin
     if not candidates:
         return None, "no liquid contracts matched expiry/strike/open-interest/spread filters"
 
+    return _closest_to_target(candidates, price, settings), None
+
+
+def _closest_to_target(candidates, price, settings):
     def score(c):
         # Prefer closest to target delta; fall back to strike distance if greeks are missing.
         if c.delta is not None:
             return abs(abs(c.delta) - settings.target_delta)
         return abs(c.strike - price) / price + 1.0
 
-    return min(candidates, key=score), None
+    return min(candidates, key=score)
+
+
+def premium_cap(dte):
+    """Highest allowed price per share for this many days to expiry, or None if it's too far out."""
+    for max_dte, cap in PREMIUM_CAPS:
+        if 0 <= dte <= max_dte:
+            return cap
+    return None
+
+
+def within_premium_cap(c):
+    cap = premium_cap(c.dte)
+    return cap is not None and tick_round(c.mid) <= cap  # the mid is the limit price the order will use
+
+
+def meets_min_delta(c):
+    return c.delta is not None and abs(c.delta) >= MIN_DELTA
+
+
+def pick_capped_contract(trading_client, option_client, underlying, kind, price, settings):
+    """Like pick_contract, but only 0-5 day contracts within PREMIUM_CAPS and at or above MIN_DELTA."""
+    same_day_open = pd.Timestamp.now("America/New_York").time() < LAST_SAME_DAY_ENTRY
+    candidates = quote_contracts(
+        trading_client, option_client, underlying, kind, price,
+        0 if same_day_open else 1, MAX_CAPPED_DTE, 0.10, settings.min_open_interest, settings.max_spread_pct,
+    )
+    if not candidates:
+        return None, "no liquid 0-5 day contracts matched"
+    allowed = [c for c in candidates if within_premium_cap(c) and meets_min_delta(c)]
+    if not allowed:
+        return None, f"none of {len(candidates)} liquid contracts are within the price limits and minimum delta"
+    return _closest_to_target(allowed, price, settings), None

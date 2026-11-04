@@ -70,6 +70,14 @@ class Broker:
             return
         self._submit(cand.symbol, qty, OrderSide.BUY, limit, reason)
 
+    def close_now(self, position, reason):
+        """Close at market, cancelling any open order that is holding the contracts."""
+        if self.live_orders:
+            req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[position.symbol])
+            for order in self.trading.get_orders(req):
+                self.trading.cancel_order_by_id(order.id)
+        self._submit(position.symbol, int(float(position.qty)), OrderSide.SELL, None, reason)
+
     def sell(self, position, reason):
         qty = int(float(position.qty_available or position.qty))
         if qty < 1:

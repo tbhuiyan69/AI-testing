@@ -12,10 +12,10 @@ import sys
 import time
 from pathlib import Path
 
-from options_bot.bot import run_cycle
+from options_bot.bot import PRICE_ACTION, SMA, run_cycle
 from options_bot.broker import Broker
 from options_bot.config import Settings
-from options_bot.price_action import BAR_MINUTES, price_action_signal
+from options_bot.price_action import BAR_MINUTES
 
 
 def setup_logging():
@@ -49,7 +49,7 @@ def main():
     live = args.trade or args.trade2
     price_action = args.trade2 or args.dry2
     broker = Broker(s, live_orders=live)
-    cycle_args = (price_action_signal,) if price_action else ()
+    strategy = PRICE_ACTION if price_action else SMA
 
     acct = broker.account()
     log.info("Account %s  equity $%s  options BP $%s  mode=%s  strategy=%s",
@@ -57,13 +57,13 @@ def main():
              "PAPER ORDERS" if live else "DRY-RUN", "price-action" if price_action else "SMA")
 
     if args.once:
-        run_cycle(broker, s, *cycle_args)
+        run_cycle(broker, s, strategy)
         return
 
     while True:
         try:
             if broker.market_open():
-                run_cycle(broker, s, *cycle_args)
+                run_cycle(broker, s, strategy)
             else:
                 log.info("Market closed; waiting.")
         except KeyboardInterrupt:

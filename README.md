@@ -29,13 +29,16 @@ All numbers are configurable; see `bot.env.example` (copy to `.env`).
 
 ## Price-action strategy (`--dry2`, `--trade2`)
 
-Replaces the SMA signal; contract selection, sizing, exits and guards stay the same. Checked just after each 5-minute bar closes.
+Replaces the SMA signal, and only buys short-dated contracts within price limits. Checked just after each 5-minute bar closes.
 
 1. **Pattern** (`options_bot/price_action.py`): one of the 10 in `price_action_use_cases.py` fires on the last closed bar. Puts use the bearish version, calls the mirror image.
 2. **Momentum**: RSI vs its 14-bar average and MACD vs signal agree on both 5m and 10m.
-3. **Flow**: put/call ratio above 1 backs a put, below 1 backs a call. It's computed from open interest in the bot's expiry/strike window.
+3. **Flow**: put/call ratio above 1 backs a put, below 1 backs a call. It's computed from open interest in the 0-5 day expiry window.
+4. **Contract price**: the limit price per share must be under $0.80 for same-day expiry, at most $1.20 for 1-3 days, and at most $1.50 for 4-5 days. Contracts further out are never bought. Delta must be at least 0.15. Among those allowed, it picks the closest to 0.40 delta, with the same open-interest and spread filters.
 
-The pattern's stop level is logged with the order but not enforced; exits are still the option-based rules above. The detectors are one interpretation of written descriptions and have not been backtested.
+**Exits:** +50% and -35% as above. The 7-day exit is replaced: a position is sold at market at 3:15 PM ET on its expiry day, because Alpaca may liquidate from 3:30 PM and in-the-money options can auto-exercise. No same-day contracts are bought after 3:00 PM ET.
+
+The pattern's stop level is logged with the order but not enforced. The detectors are one interpretation of written descriptions and have not been backtested.
 
 The SMA crossover is a placeholder to exercise the plumbing, not a tested edge.
 Swap in your own logic by editing `signal_for` in `options_bot/strategy.py`.

@@ -1,7 +1,7 @@
 """Run with: python -m unittest discover tests"""
 import sys
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -11,7 +11,8 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from options_bot import bot, price_action as pa
+from options_bot import bot, contracts, price_action as pa
+from options_bot.contracts import Candidate, premium_cap, within_premium_cap
 from options_bot.price_action import detect, momentum_confirms, pivots
 from price_action_use_cases import CASES
 
@@ -187,10 +188,112 @@ class Gates(unittest.TestCase):
         broker = FakeBroker()
         s = SimpleNamespace(watchlist=["AAA"], max_open_positions=3)
         cand = SimpleNamespace(delta=-0.40)
-        signal = lambda *_: ("put", 250.0, "QM Quick Retest put, stop 252.20, P/C 2.00")
-        with patch.object(bot, "pick_contract", return_value=(cand, None)):
-            bot.look_for_entries(broker, s, signal)
+        strategy = bot.Strategy(
+            signal=lambda *_: ("put", 250.0, "QM Quick Retest put, stop 252.20, P/C 2.00"),
+            pick=lambda *_: (cand, None),
+            time_exit=lambda *_: None,
+        )
+        bot.look_for_entries(broker, s, strategy)
         self.assertEqual(broker.bought, [(cand, "QM Quick Retest put, stop 252.20, P/C 2.00, delta -0.40")])
+
+
+def candidate(dte, mid, delta=-0.30):
+    return Candidate("X", 100.0, date.today() + timedelta(days=dte), mid - 0.01, mid + 0.01, delta)
+
+
+class PriceLimits(unittest.TestCase):
+    def test_caps_by_days_to_expiry(self):
+        expected = {0: 0.79, 1: 1.20, 3: 1.20, 4: 1.50, 5: 1.50, 6: None, 30: None, -1: None}
+        for dte, cap in expected.items():
+            with self.subTest(dte):
+                self.assertEqual(premium_cap(dte), cap)
+
+    def test_prices_on_each_side_of_the_limits(self):
+        cases = [(0, 0.79, True), (0, 0.80, False), (3, 1.20, True), (3, 1.21, False),
+                 (5, 1.50, True), (5, 1.51, False), (6, 0.10, False)]
+        for dte, mid, allowed in cases:
+            with self.subTest(dte=dte, mid=mid):
+                self.assertEqual(within_premium_cap(candidate(dte, mid)), allowed)
+
+    def pick(self, candidates):
+        settings = SimpleNamespace(min_open_interest=100, max_spread_pct=0.10, target_delta=0.40)
+        with patch.object(contracts, "quote_contracts", return_value=candidates) as quote:
+            result = contracts.pick_capped_contract(None, None, "AAA", "put", 100.0, settings)
+        return result, quote
+
+    def test_closer_delta_loses_if_over_the_limit(self):
+        too_dear, cheap = candidate(3, 1.30, delta=-0.40), candidate(3, 1.00, delta=-0.20)
+        (chosen, _), _ = self.pick([too_dear, cheap])
+        self.assertIs(chosen, cheap)
+
+    def test_no_contract_when_all_are_over_the_limit(self):
+        (chosen, why), _ = self.pick([candidate(0, 0.90), candidate(5, 1.60)])
+        self.assertIsNone(chosen)
+        self.assertIn("price limits", why)
+
+    def test_contracts_below_minimum_delta_are_never_chosen(self):
+        for delta in (-0.01, 0.14, None):
+            with self.subTest(delta):
+                (chosen, why), _ = self.pick([candidate(3, 1.00, delta=delta)])
+                self.assertIsNone(chosen)
+                self.assertIn("minimum delta", why)
+
+    def test_minimum_delta_is_inclusive_for_calls_and_puts(self):
+        for delta in (-0.15, 0.15):
+            with self.subTest(delta):
+                c = candidate(3, 1.00, delta=delta)
+                (chosen, _), _ = self.pick([c])
+                self.assertIs(chosen, c)
+
+    def test_only_asks_for_contracts_up_to_five_days(self):
+        _, quote = self.pick([])
+        self.assertEqual(quote.call_args.args[6], 5)
+
+
+def eastern(hour, minute):
+    return pd.Timestamp(date.today().isoformat() + f" {hour:02d}:{minute:02d}", tz="America/New_York")
+
+
+class SameDayTiming(unittest.TestCase):
+    def occ(self, dte):
+        return f"AAA{(date.today() + timedelta(days=dte)):%y%m%d}C00100000"
+
+    def exit_reason(self, dte, hour, minute):
+        with patch.object(pd.Timestamp, "now", return_value=eastern(hour, minute)):
+            return pa.expiry_day_exit(self.occ(dte), None)
+
+    def test_expiring_position_is_closed_only_from_3_15(self):
+        self.assertIsNone(self.exit_reason(0, 15, 14))
+        self.assertIsNotNone(self.exit_reason(0, 15, 15))
+
+    def test_later_expiry_is_not_closed(self):
+        self.assertIsNone(self.exit_reason(1, 15, 59))
+        self.assertIsNone(self.exit_reason(5, 15, 59))
+
+    def test_position_inside_seven_days_is_not_sold_by_the_old_rule(self):
+        self.assertIsNone(self.exit_reason(5, 10, 0))
+
+    def first_dte_requested(self, hour, minute):
+        settings = SimpleNamespace(min_open_interest=100, max_spread_pct=0.10, target_delta=0.40)
+        with (patch.object(pd.Timestamp, "now", return_value=eastern(hour, minute)),
+              patch.object(contracts, "quote_contracts", return_value=[]) as quote):
+            contracts.pick_capped_contract(None, None, "AAA", "put", 100.0, settings)
+        return quote.call_args.args[5]
+
+    def test_same_day_contracts_stop_at_3_pm(self):
+        self.assertEqual(self.first_dte_requested(14, 59), 0)
+        self.assertEqual(self.first_dte_requested(15, 0), 1)
+
+    def test_time_exit_uses_a_market_close_ahead_of_profit_rules(self):
+        closed, sold = [], []
+        position = SimpleNamespace(symbol=self.occ(0), unrealized_plpc="0.90")
+        broker = SimpleNamespace(option_positions=lambda: [position],
+                                 close_now=lambda p, why: closed.append(why),
+                                 sell=lambda p, why: sold.append(why))
+        s = SimpleNamespace(take_profit_pct=0.50, stop_loss_pct=0.35)
+        with patch.object(pd.Timestamp, "now", return_value=eastern(15, 20)):
+            bot.manage_exits(broker, s, bot.PRICE_ACTION)
+        self.assertEqual((closed, sold), (["expiry-day exit"], []))
 
 
 if __name__ == "__main__":
