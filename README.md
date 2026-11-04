@@ -237,3 +237,9 @@ This project is not affiliated with, endorsed by, or sponsored by any of the dat
 **star the repo** ⭐ — it's the best way to support the project.
 
 </div>
+
+---
+
+## Alpaca paper options bot
+
+This repository also holds a separate Python options bot that trades an Alpaca **paper** account. It is independent of the dashboard above. See [options_bot/README.md](options_bot/README.md) for how to run it.

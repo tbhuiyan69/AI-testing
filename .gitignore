@@ -11,3 +11,21 @@ out/
 # Database
 data/*.db*
 data/.api-key
+
+# Secrets
+.env.*
+*.key
+*secret*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+Thumbs.db
+
+# Bot output
+logs/
+!.env.example
