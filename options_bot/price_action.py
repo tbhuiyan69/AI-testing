@@ -21,6 +21,7 @@ from .ema_rsi_macd import ema, rsi_wilder
 BAR_MINUTES = 5
 STALE_MINUTES = 15
 MIN_BARS = 60
+MIN_RSI_BARS = 30
 PIVOT_K = 2
 SCAN_BARS = 40  # how far back a spike or break may be and still count
 TOL_ATR = 0.25  # levels within this many ATRs count as the same level
@@ -271,37 +272,50 @@ def detect(df):
     return put
 
 
-def _momentum_agrees(close, kind):
+def _rsi_agrees(close, kind):
     rsi = rsi_wilder(close, 14)
     rsi_avg = rsi.rolling(14).mean()
+    return rsi.iloc[-1] < rsi_avg.iloc[-1] if kind == "put" else rsi.iloc[-1] > rsi_avg.iloc[-1]
+
+
+def _macd_agrees(close, kind):
     macd = ema(close, 12) - ema(close, 26)
     signal = ema(macd, 9)
-    if kind == "put":
-        return rsi.iloc[-1] < rsi_avg.iloc[-1] and macd.iloc[-1] < signal.iloc[-1]
-    return rsi.iloc[-1] > rsi_avg.iloc[-1] and macd.iloc[-1] > signal.iloc[-1]
+    return macd.iloc[-1] < signal.iloc[-1] if kind == "put" else macd.iloc[-1] > signal.iloc[-1]
 
 
-def momentum_confirms(df, kind):
-    """RSI vs its average line and MACD vs its signal line must agree on the 5m and 10m."""
+def momentum_confirms(df, df_1m, kind):
+    """RSI vs its average line on the 1m, and MACD vs its signal line on the 5m and 10m, must all agree."""
+    if len(df_1m) < MIN_RSI_BARS:
+        return False  # not enough 1-minute bars for a reliable RSI, so don't treat it as agreement
     grouped = df.close.resample("10min")
     complete = grouped.last()[grouped.count() == 2]
-    return bool(_momentum_agrees(df.close, kind) and _momentum_agrees(complete, kind))
+    return bool(_rsi_agrees(df_1m.close, kind) and _macd_agrees(df.close, kind) and _macd_agrees(complete, kind))
 
 
-def fetch_5m(stock_client, symbol, days=7):
-    """Closed 5m regular-session bars, indexed in US/Eastern."""
+def _fetch_bars(stock_client, symbol, minutes, days):
+    """Closed regular-session bars, indexed in US/Eastern."""
     now = datetime.now(timezone.utc)
     req = StockBarsRequest(
         symbol_or_symbols=symbol,
-        timeframe=TimeFrame(BAR_MINUTES, TimeFrameUnit.Minute),
+        timeframe=TimeFrame(minutes, TimeFrameUnit.Minute),
         start=now - timedelta(days=days),
         feed=DataFeed.IEX,
     )
     df = stock_client.get_stock_bars(req).df
     if df.empty:
         return df
-    df = df.xs(symbol, level="symbol").tz_convert("America/New_York").between_time("09:30", "15:55").copy()
-    return df[df.index + pd.Timedelta(minutes=BAR_MINUTES) <= now]
+    last_start = f"15:{60 - minutes:02d}"
+    df = df.xs(symbol, level="symbol").tz_convert("America/New_York").between_time("09:30", last_start).copy()
+    return df[df.index + pd.Timedelta(minutes=minutes) <= now]
+
+
+def fetch_5m(stock_client, symbol, days=7):
+    return _fetch_bars(stock_client, symbol, BAR_MINUTES, days)
+
+
+def fetch_1m(stock_client, symbol, days=3):
+    return _fetch_bars(stock_client, symbol, 1, days)
 
 
 def expiry_day_exit(symbol, s):
@@ -327,7 +341,7 @@ def price_action_signal(broker, symbol, s):
     if not setup:
         return None, price, None
     label = f"{setup.pattern} {setup.kind}, stop {setup.stop:.2f}"
-    if not s.skip_momentum and not momentum_confirms(df, setup.kind):
+    if not s.skip_momentum and not momentum_confirms(df, fetch_1m(broker.stocks, symbol), setup.kind):
         return None, price, f"{label}, blocked: RSI/MACD disagree"
     ratio = pc_ratio(broker.trading, symbol, price, 0, MAX_CAPPED_DTE)
     if ratio is None:

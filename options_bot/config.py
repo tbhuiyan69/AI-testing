@@ -58,6 +58,7 @@ class Settings:
     # Exits
     take_profit_pct: float = field(default_factory=lambda: _env("BOT_TAKE_PROFIT_PCT", 0.50, float))
     stop_loss_pct: float = field(default_factory=lambda: _env("BOT_STOP_LOSS_PCT", 0.35, float))
+    short_dte_stop_loss_pct: float = field(default_factory=lambda: _env("BOT_SHORT_DTE_STOP_LOSS_PCT", 0.50, float))
     exit_dte: int = field(default_factory=lambda: _env("BOT_EXIT_DTE", 7, int))
     skip_momentum: bool = False  # set by run_bot.py --skip-rsi-macd
     auto_approve: bool = False  # set by run_bot.py --auto; applies to contracts costing under auto_approve_below

@@ -38,6 +38,14 @@ def profit_lock_exit(p, s):
     return None
 
 
+def default_stop_loss(s):
+    return s.stop_loss_pct
+
+
+def short_dte_stop_loss(s):
+    return s.short_dte_stop_loss_pct
+
+
 def sma_signal(broker, symbol, s):
     kind, price = signal_for(broker.stocks, symbol, s)
     return kind, price, f"{symbol} SMA{s.fast_sma}/{s.slow_sma} cross -> {kind}"
@@ -53,12 +61,13 @@ class Strategy:
     take_profit: Callable = pct_take_profit
     take_profit_at_market: bool = False
     confirm_buys: bool = False
+    stop_loss: Callable = default_stop_loss
 
 
 SMA = Strategy(sma_signal, pick_contract, dte_exit)
 PRICE_ACTION = Strategy(price_action_signal, pick_capped_contract, expiry_day_exit,
                         time_exit_at_market=True, show_blocked=True, take_profit=profit_lock_exit,
-                        take_profit_at_market=True, confirm_buys=True)
+                        take_profit_at_market=True, confirm_buys=True, stop_loss=short_dte_stop_loss)
 
 
 def manage_exits(broker, s, strategy):
@@ -82,7 +91,7 @@ def exit_position(broker, s, strategy, p):
         broker.close_now(p, take_profit)
     elif take_profit:
         broker.sell(p, take_profit)
-    elif plpc <= -s.stop_loss_pct:
+    elif plpc <= -strategy.stop_loss(s):
         broker.sell(p, f"stop loss {plpc:+.0%}")
     elif time_exit:
         broker.sell(p, time_exit)

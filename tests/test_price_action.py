@@ -126,13 +126,25 @@ class Momentum(unittest.TestCase):
 
     def test_falling_price_confirms_put_only(self):
         df = self.falling()
-        self.assertTrue(momentum_confirms(df, "put"))
-        self.assertFalse(momentum_confirms(df, "call"))
+        self.assertTrue(momentum_confirms(df, df, "put"))
+        self.assertFalse(momentum_confirms(df, df, "call"))
 
     def test_rising_price_confirms_call_only(self):
         df = flip(self.falling())
-        self.assertTrue(momentum_confirms(df, "call"))
-        self.assertFalse(momentum_confirms(df, "put"))
+        self.assertTrue(momentum_confirms(df, df, "call"))
+        self.assertFalse(momentum_confirms(df, df, "put"))
+
+    def test_rsi_comes_from_the_one_minute_bars(self):
+        df, rising_1m = self.falling(), flip(self.falling())
+        self.assertFalse(momentum_confirms(df, rising_1m, "put"))
+
+    def test_macd_comes_from_the_five_minute_bars(self):
+        df, falling_1m = flip(self.falling()), self.falling()
+        self.assertFalse(momentum_confirms(df, falling_1m, "put"))
+
+    def test_too_few_one_minute_bars_blocks_the_trade(self):
+        df = self.falling()
+        self.assertFalse(momentum_confirms(df, df.iloc[-29:], "put"))
 
 
 class FakeBroker:
@@ -164,6 +176,7 @@ class Gates(unittest.TestCase):
         df.index = pd.date_range(end=last_close, periods=len(df), freq="5min")
         with (patch.object(pa, "fetch_5m", return_value=df),
               patch.object(pa, "pc_ratio", return_value=ratio),
+              patch.object(pa, "fetch_1m", return_value=df),
               patch.object(pa, "momentum_confirms", return_value=momentum)):
             return pa.price_action_signal(FakeBroker(live), "AAA", SimpleNamespace(skip_momentum=skip_momentum))
 
@@ -216,7 +229,8 @@ def position(pl, plpc, symbol="AAPL261120P00335000", qty="2"):
 
 
 class ProfitLock(unittest.TestCase):
-    s = SimpleNamespace(profit_lock_dollars=5.0, take_profit_pct=0.50, stop_loss_pct=0.35, exit_dte=7)
+    s = SimpleNamespace(profit_lock_dollars=5.0, take_profit_pct=0.50, stop_loss_pct=0.35, exit_dte=7,
+                        short_dte_stop_loss_pct=0.50)
 
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -263,7 +277,8 @@ class ProfitLock(unittest.TestCase):
         self.assertEqual(self.run_exits(position(4, 0.01)), ([], []))
 
     def test_unlocked_position_still_has_the_stop_loss(self):
-        self.assertEqual(self.run_exits(position(-400, -0.40)), ([], ["stop loss -40%"]))
+        self.assertEqual(self.run_exits(position(-400, -0.49)), ([], []))
+        self.assertEqual(self.run_exits(position(-500, -0.50)), ([], ["stop loss -50%"]))
 
     def test_file_error_never_stops_exit_checks_and_lock_still_holds(self):
         with (patch("options_bot.profit_lock.os.replace", side_effect=PermissionError("in use")),
@@ -277,6 +292,9 @@ class ProfitLock(unittest.TestCase):
 
     def test_default_target_is_five(self):
         self.assertEqual(Settings().profit_lock_dollars, 5.0)
+
+    def test_sma_strategy_keeps_its_own_stop_loss(self):
+        self.assertEqual(self.run_exits(position(-400, -0.40), bot.SMA), ([], ["stop loss -40%"]))
 
     def test_sma_strategy_still_waits_for_fifty_percent(self):
         self.assertEqual(self.run_exits(position(120, 0.20), bot.SMA), ([], []))
@@ -343,7 +361,8 @@ class ExitFailures(unittest.TestCase):
 
         positions = [SimpleNamespace(symbol=sym, unrealized_plpc="-0.50", unrealized_pl="-50") for sym in ("BAD", "GOOD")]
         broker = SimpleNamespace(option_positions=lambda: positions, sell=sell)
-        s = SimpleNamespace(profit_lock_dollars=5.0, take_profit_pct=0.50, stop_loss_pct=0.35)
+        s = SimpleNamespace(profit_lock_dollars=5.0, take_profit_pct=0.50, stop_loss_pct=0.35,
+                            short_dte_stop_loss_pct=0.50)
         with (patch.object(bot, "PROFIT_LOCKS", ProfitLocks(Path(tempfile.mkdtemp()) / "locks.json")),
               self.assertLogs("bot", "ERROR") as logs):
             bot.manage_exits(broker, s, bot.PRICE_ACTION)

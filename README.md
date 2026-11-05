@@ -40,11 +40,11 @@ Replaces the SMA signal, and only buys short-dated contracts within price limits
 `--trade2` lists every contract it wants to buy with its price, quantity and cost, then asks yes or no for each. Anything but `y` or `yes` within 60 seconds (`BOT_APPROVAL_SECONDS`) skips the trade. Exits are not asked about. It needs an open terminal; without one, no buys go through. `--dry2` shows the same list without asking or ordering.
 
 1. **Pattern** (`options_bot/price_action.py`): one of the 10 in `price_action_use_cases.py` fires on the last closed bar. Puts use the bearish version, calls the mirror image.
-2. **Momentum**: RSI vs its 14-bar average and MACD vs signal agree on both 5m and 10m.
+2. **Momentum**: RSI vs its 14-bar average on the 1m, and MACD vs signal on both the 5m and 10m, all agree.
 3. **Flow**: put/call ratio above 1 backs a put, below 1 backs a call. It's computed from open interest in the 0-5 day expiry window.
 4. **Contract price**: the limit price per share must be under $0.80 for same-day expiry, at most $1.20 for 1-3 days, and at most $1.50 for 4-5 days. Contracts further out are never bought. Delta must be at least 0.15. Among those allowed, it picks the closest to 0.40 delta, with the same open-interest and spread filters.
 
-**Exits:** there's no profit cap. Once a position's profit passes $5 (`BOT_PROFIT_LOCK_DOLLARS`), it's sold at market if the profit falls back to $5, otherwise it keeps running. The bot checks this each minute, so it isn't a stop held at the broker and a sale can land below $5. The lock is kept in `logs/profit_locks.json` across restarts. The -35% stop stays as above, and this replaces the +50% target. The 7-day exit is also replaced: a position is sold at market at 3:15 PM ET on its expiry day, because Alpaca may liquidate from 3:30 PM and in-the-money options can auto-exercise. No same-day contracts are bought after 3:00 PM ET.
+**Exits:** there's no profit cap. Once a position's profit passes $5 (`BOT_PROFIT_LOCK_DOLLARS`), it's sold at market if the profit falls back to $5, otherwise it keeps running. The bot checks this each minute, so it isn't a stop held at the broker and a sale can land below $5. The lock is kept in `logs/profit_locks.json` across restarts. The stop is -50% (`BOT_SHORT_DTE_STOP_LOSS_PCT`), and this replaces the +50% target. The 7-day exit is also replaced: a position is sold at market at 3:15 PM ET on its expiry day, because Alpaca may liquidate from 3:30 PM and in-the-money options can auto-exercise. No same-day contracts are bought after 3:00 PM ET.
 
 The pattern's stop level is logged with the order but not enforced. The detectors are one interpretation of written descriptions and have not been backtested.
 
