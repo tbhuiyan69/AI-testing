@@ -58,6 +58,7 @@ class Settings:
     take_profit_pct: float = field(default_factory=lambda: _env("BOT_TAKE_PROFIT_PCT", 0.50, float))
     stop_loss_pct: float = field(default_factory=lambda: _env("BOT_STOP_LOSS_PCT", 0.35, float))
     exit_dte: int = field(default_factory=lambda: _env("BOT_EXIT_DTE", 7, int))
+    approval_seconds: int = field(default_factory=lambda: _env("BOT_APPROVAL_SECONDS", 60, int))
     quick_profit_dollars: float = field(default_factory=lambda: _env("BOT_QUICK_PROFIT_DOLLARS", 10.0, float))
     quick_profit_pct: float = field(default_factory=lambda: _env("BOT_QUICK_PROFIT_PCT", 0.03, float))
 

@@ -271,15 +271,6 @@ def detect(df):
     return put
 
 
-def recent_setup(df, bars):
-    """Newest setup on any of the last `bars` closed bars, so bars between checks aren't missed."""
-    for back in range(max(bars, 1)):
-        setup = detect(df.iloc[:len(df) - back])
-        if setup:
-            return setup
-    return None
-
-
 def _momentum_agrees(close, kind):
     rsi = rsi_wilder(close, 14)
     rsi_avg = rsi.rolling(14).mean()
@@ -332,7 +323,7 @@ def price_action_signal(broker, symbol, s):
     if broker.live_orders and age > timedelta(minutes=STALE_MINUTES):
         return None, price, f"latest bar is {age} old"
 
-    setup = recent_setup(df, s.poll_minutes // BAR_MINUTES)
+    setup = detect(df)
     if not setup:
         return None, price, None
     label = f"{setup.pattern} {setup.kind}, stop {setup.stop:.2f}"

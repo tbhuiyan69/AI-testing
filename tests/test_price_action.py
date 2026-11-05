@@ -12,6 +12,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from options_bot import bot, contracts, price_action as pa
+from options_bot.approval import ask_yes_no
 from options_bot.broker import Broker
 from options_bot.contracts import Candidate, premium_cap, within_premium_cap
 from options_bot.price_action import detect, momentum_confirms, pivots
@@ -198,27 +199,6 @@ class Gates(unittest.TestCase):
         self.assertEqual(broker.bought, [(cand, "QM Quick Retest put, stop 252.20, P/C 2.00, delta -0.40")])
 
 
-class FifteenMinuteChecks(unittest.TestCase):
-    def quiet_bars_after(self, df, count):
-        last = df.iloc[-1]
-        rows = pd.DataFrame([[last.close, last.close + 0.01, last.close - 0.01, last.close]] * count, columns=df.columns,
-                            index=pd.date_range(df.index[-1] + pd.Timedelta(minutes=5), periods=count, freq="5min"))
-        return pd.concat([df, rows])
-
-    def test_finds_a_setup_from_up_to_two_bars_ago(self):
-        for count in (0, 1, 2):
-            with self.subTest(count):
-                df = self.quiet_bars_after(SCENARIOS["QM Quick Retest"], count)
-                self.assertEqual(pa.recent_setup(df, 3).pattern, "QM Quick Retest")
-
-    def test_ignores_a_setup_from_before_the_last_check(self):
-        df = self.quiet_bars_after(SCENARIOS["QM Quick Retest"], 3)
-        self.assertIsNone(pa.recent_setup(df, 3))
-
-    def test_short_interval_still_checks_the_latest_bar(self):
-        self.assertIsNotNone(pa.recent_setup(SCENARIOS["QM Quick Retest"], 0))
-
-
 def position(pl, plpc, symbol="AAPL261120P00335000", qty="2"):
     return SimpleNamespace(symbol=symbol, unrealized_pl=str(pl), unrealized_plpc=str(plpc), qty=qty,
                            qty_available="0", current_price="1.25")
@@ -275,6 +255,132 @@ class ReplacingSells(unittest.TestCase):
         b, calls = self.broker(False, [SimpleNamespace(id="old")])
         b.sell(position(12, 0.02), "take profit")
         self.assertEqual([c[0] for c in calls], ["submit"])
+
+
+class FakeKeys:
+    """Stands in for msvcrt: hands out typed keys, then reports nothing pressed."""
+
+    def __init__(self, keys):
+        self.keys = list(keys)
+        self.armed = False
+
+    def kbhit(self):
+        if not self.armed:  # the first check is the flush of earlier typing
+            self.armed = True
+            return False
+        return bool(self.keys)
+
+    def getwche(self):
+        return self.keys.pop(0)
+
+    def getwch(self):
+        return self.keys.pop(0)
+
+
+class AskYesNo(unittest.TestCase):
+    def ask(self, keys, timeout=5, tty=True):
+        with (patch.dict(sys.modules, {"msvcrt": FakeKeys(keys)}), patch("sys.stdin.isatty", return_value=tty),
+              patch("builtins.print")):
+            return ask_yes_no("Buy?", timeout)
+
+    def test_only_y_or_yes_approves(self):
+        for keys, expected in [("y\r", True), ("YES\r", True), ("n\r", False), ("\r", False), ("maybe\r", False)]:
+            with self.subTest(keys):
+                self.assertEqual(self.ask(keys), expected)
+
+    def test_no_answer_in_time_is_no(self):
+        self.assertFalse(self.ask("", timeout=0.1))
+
+    def test_y_without_enter_is_no(self):
+        self.assertFalse(self.ask("y", timeout=0.1))
+
+    def test_no_terminal_is_no(self):
+        self.assertFalse(self.ask("y\r", tty=False))
+
+    def test_ctrl_c_stops_the_bot(self):
+        with self.assertRaises(KeyboardInterrupt):
+            self.ask("\x03")
+
+
+class ApprovalBroker:
+    trading = options = None
+
+    def __init__(self, live=True, positions=0, qty=8):
+        self.live_orders, self.qty, self.positions = live, qty, [SimpleNamespace(symbol="X")] * positions
+        self.bought = []
+
+    def daily_loss_hit(self):
+        return False
+
+    def option_positions(self):
+        return self.positions
+
+    def busy_underlyings(self):
+        return set()
+
+    def order_size(self, cand):
+        return self.qty, 1.10
+
+    def buy(self, cand, reason):
+        self.bought.append(cand.symbol)
+
+
+class ApprovingBuys(unittest.TestCase):
+    def run_entries(self, broker, answers, max_open=3):
+        symbols = ["AAA", "BBB", "CCC"]
+        s = SimpleNamespace(watchlist=symbols, max_open_positions=max_open, approval_seconds=60)
+        pick = lambda _t, _o, sym, *_: (
+            Candidate(sym + "CONTRACT", 100.0, date.today() + timedelta(days=3), 1.08, 1.12, 0.3), None)
+        strategy = bot.Strategy(signal=lambda _b, sym, _s: ("call", 100.0, f"{sym} setup"), pick=pick,
+                                time_exit=lambda *_: None, confirm_buys=True)
+        with patch.object(bot, "ask_yes_no", side_effect=answers) as ask:
+            bot.look_for_entries(broker, s, strategy)
+        return ask
+
+    def test_buys_only_what_is_approved(self):
+        broker = ApprovalBroker()
+        ask = self.run_entries(broker, [True, False, True])
+        self.assertEqual(broker.bought, ["AAACONTRACT", "CCCCONTRACT"])
+        self.assertEqual(ask.call_count, 3)
+
+    def test_question_shows_contract_price_and_cost(self):
+        ask = self.run_entries(ApprovalBroker(), [False, False, False])
+        self.assertEqual(ask.call_args_list[0].args[0], "BUY 8 x AAACONTRACT at 1.10, cost $880.00?")
+
+    def test_every_target_is_listed_before_the_first_question(self):
+        with self.assertLogs("bot", "INFO") as logs:
+            self.run_entries(ApprovalBroker(), [False, False, False])
+        listed = [line for line in logs.output if "exp " in line]
+        self.assertEqual(len(listed), 3)
+        self.assertTrue(all("price 1.10" in line and "cost $880.00" in line for line in listed))
+
+    def test_stops_asking_once_positions_are_full(self):
+        broker = ApprovalBroker(positions=2)
+        ask = self.run_entries(broker, [True])
+        self.assertEqual(broker.bought, ["AAACONTRACT"])
+        self.assertEqual(ask.call_count, 1)
+
+    def test_dry_run_never_asks(self):
+        broker = ApprovalBroker(live=False)
+        ask = self.run_entries(broker, [])
+        self.assertEqual(ask.call_count, 0)
+        self.assertEqual(len(broker.bought), 3)
+
+    def test_too_expensive_is_not_asked(self):
+        broker = ApprovalBroker(qty=0)
+        ask = self.run_entries(broker, [])
+        self.assertEqual(ask.call_count, 0)
+
+    def test_exit_only_cycle_skips_entries(self):
+        calls = []
+        with (patch.object(bot, "manage_exits", lambda *_: calls.append("exits")),
+              patch.object(bot, "look_for_entries", lambda *_: calls.append("entries"))):
+            bot.run_cycle(None, None, bot.PRICE_ACTION, entries=False)
+        self.assertEqual(calls, ["exits"])
+
+    def test_sma_strategy_does_not_ask(self):
+        self.assertFalse(bot.SMA.confirm_buys)
+        self.assertTrue(bot.PRICE_ACTION.confirm_buys)
 
 
 def candidate(dte, mid, delta=-0.30):

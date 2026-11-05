@@ -11,7 +11,7 @@ python run_bot.py --once     # one cycle, dry-run: logs what it would do, places
 python run_bot.py            # loop every 15 min during market hours, dry-run
 python run_bot.py --trade    # loop and submit real paper orders
 python run_bot.py --dry2     # price-action strategy, log only
-python run_bot.py --trade2   # price-action strategy, submit real paper orders
+python run_bot.py --trade2   # price-action strategy, asks yes/no before each paper buy
 ```
 
 Logs go to `logs/bot.log`; every order (or dry-run order) is appended to `logs/trades.csv`.
@@ -29,7 +29,9 @@ All numbers are configurable; see `bot.env.example` (copy to `.env`).
 
 ## Price-action strategy (`--dry2`, `--trade2`)
 
-Replaces the SMA signal, and only buys short-dated contracts within price limits. Checked every 15 minutes on the clock (`BOT_POLL_MINUTES`), looking at each 5-minute bar closed since the last check.
+Replaces the SMA signal, and only buys short-dated contracts within price limits. Exits are checked every minute, and new setups each time a 5-minute bar closes.
+
+`--trade2` lists every contract it wants to buy with its price, quantity and cost, then asks yes or no for each. Anything but `y` or `yes` within 60 seconds (`BOT_APPROVAL_SECONDS`) skips the trade. Exits are not asked about. It needs an open terminal; without one, no buys go through. `--dry2` shows the same list without asking or ordering.
 
 1. **Pattern** (`options_bot/price_action.py`): one of the 10 in `price_action_use_cases.py` fires on the last closed bar. Puts use the bearish version, calls the mirror image.
 2. **Momentum**: RSI vs its 14-bar average and MACD vs signal agree on both 5m and 10m.

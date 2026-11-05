@@ -3,6 +3,7 @@ import logging
 from dataclasses import dataclass
 from typing import Callable
 
+from .approval import ask_yes_no
 from .broker import days_to_expiry
 from .contracts import pick_capped_contract, pick_contract
 from .price_action import expiry_day_exit, price_action_signal
@@ -42,11 +43,13 @@ class Strategy:
     time_exit_at_market: bool = False
     show_blocked: bool = False
     take_profit: Callable = pct_take_profit
+    confirm_buys: bool = False
 
 
 SMA = Strategy(sma_signal, pick_contract, dte_exit)
 PRICE_ACTION = Strategy(price_action_signal, pick_capped_contract, expiry_day_exit,
-                        time_exit_at_market=True, show_blocked=True, take_profit=quick_take_profit)
+                        time_exit_at_market=True, show_blocked=True, take_profit=quick_take_profit,
+                        confirm_buys=True)
 
 
 def manage_exits(broker, s, strategy):
@@ -67,6 +70,30 @@ def manage_exits(broker, s, strategy):
             log.info("HOLD %s  P/L %+.0f%%  %s DTE", p.symbol, plpc * 100, dte)
 
 
+def confirm_and_buy(broker, s, targets, open_count):
+    """List every contract the bot wants to buy with its price, then ask about each one."""
+    log.info("TARGETS: %d contract(s) ready to buy", len(targets))
+    for cand, reason in targets:
+        qty, limit = broker.order_size(cand)
+        log.info("  %-22s exp %s (%d DTE)  price %.2f  bid %.2f / ask %.2f  qty %d  cost $%.2f  [%s]",
+                 cand.symbol, cand.expiration, cand.dte, limit, cand.bid, cand.ask, qty, limit * 100 * qty, reason)
+
+    for cand, reason in targets:
+        qty, limit = broker.order_size(cand)
+        if qty < 1:
+            broker.buy(cand, reason)  # logs why it's too expensive; sends nothing
+            continue
+        if open_count >= s.max_open_positions:
+            log.info("Max open positions (%d) reached; not asking about the rest.", s.max_open_positions)
+            return
+        question = f"BUY {qty} x {cand.symbol} at {limit:.2f}, cost ${limit * 100 * qty:,.2f}?"
+        if broker.live_orders and not ask_yes_no(question, s.approval_seconds):
+            log.info("NOT APPROVED %s", cand.symbol)
+            continue
+        broker.buy(cand, reason)
+        open_count += 1
+
+
 def look_for_entries(broker, s, strategy):
     if broker.daily_loss_hit():
         log.warning("Daily loss limit (%.0f%%) hit; no new entries today.", s.daily_loss_limit_pct * 100)
@@ -74,6 +101,7 @@ def look_for_entries(broker, s, strategy):
 
     open_count = len(broker.option_positions())
     busy = broker.busy_underlyings()
+    targets = []
     for symbol in s.watchlist:
         if open_count >= s.max_open_positions:
             log.info("Max open positions (%d) reached.", s.max_open_positions)
@@ -95,10 +123,17 @@ def look_for_entries(broker, s, strategy):
             log.info("%s: %s signal but %s", symbol, kind, why)
             continue
         delta = f"{cand.delta:+.2f}" if cand.delta is not None else "n/a"
+        if strategy.confirm_buys:
+            targets.append((cand, f"{reason}, delta {delta}"))
+            continue
         broker.buy(cand, f"{reason}, delta {delta}")
         open_count += 1
 
+    if targets:
+        confirm_and_buy(broker, s, targets, open_count)
 
-def run_cycle(broker, s, strategy=SMA):
+
+def run_cycle(broker, s, strategy=SMA, entries=True):
     manage_exits(broker, s, strategy)
-    look_for_entries(broker, s, strategy)
+    if entries:
+        look_for_entries(broker, s, strategy)

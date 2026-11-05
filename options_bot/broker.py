@@ -62,9 +62,12 @@ class Broker:
         return busy
 
     # ---- actions -----------------------------------------------------------
+    def order_size(self, cand):
+        """Contracts and limit price a buy would use; qty is 0 if one contract is over the trade limit."""
+        return int(self.s.max_trade_dollars // (cand.ask * 100)), tick_round(cand.mid)
+
     def buy(self, cand, reason):
-        limit = tick_round(cand.mid)
-        qty = int(self.s.max_trade_dollars // (cand.ask * 100))
+        qty, limit = self.order_size(cand)
         if qty < 1:
             log.info("SKIP %s: one contract (~$%.0f) exceeds max trade size $%.0f",
                      cand.symbol, cand.ask * 100, self.s.max_trade_dollars)
