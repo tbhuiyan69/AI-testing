@@ -10,6 +10,7 @@ pip install -r requirements.txt
 python run_bot.py --once     # one cycle, dry-run: logs what it would do, places nothing
 python run_bot.py            # loop every 15 min during market hours, dry-run
 python run_bot.py --trade    # loop and submit real paper orders
+python run_bot.py --trade2 --auto   # same, but contracts under $100 each (`BOT_AUTO_APPROVE_BELOW`) buy without asking
 python run_bot.py --dry2     # price-action strategy, log only
 python run_bot.py --trade2   # price-action strategy, asks yes/no before each paper buy
 ```

@@ -58,6 +58,8 @@ class Settings:
     take_profit_pct: float = field(default_factory=lambda: _env("BOT_TAKE_PROFIT_PCT", 0.50, float))
     stop_loss_pct: float = field(default_factory=lambda: _env("BOT_STOP_LOSS_PCT", 0.35, float))
     exit_dte: int = field(default_factory=lambda: _env("BOT_EXIT_DTE", 7, int))
+    auto_approve: bool = False  # set by run_bot.py --auto; applies to contracts costing under auto_approve_below
+    auto_approve_below: float = field(default_factory=lambda: _env("BOT_AUTO_APPROVE_BELOW", 100.0, float))
     approval_seconds: int = field(default_factory=lambda: _env("BOT_APPROVAL_SECONDS", 60, int))
     profit_lock_dollars: float = field(default_factory=lambda: _env("BOT_PROFIT_LOCK_DOLLARS", 5.0, float))
 

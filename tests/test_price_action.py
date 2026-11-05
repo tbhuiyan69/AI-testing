@@ -340,8 +340,9 @@ class AskYesNo(unittest.TestCase):
 class ApprovalBroker:
     trading = options = None
 
-    def __init__(self, live=True, positions=0, qty=8):
-        self.live_orders, self.qty, self.positions = live, qty, [SimpleNamespace(symbol="X")] * positions
+    def __init__(self, live=True, positions=0, qty=8, limit=1.10):
+        self.live_orders, self.qty, self.limit = live, qty, limit
+        self.positions = [SimpleNamespace(symbol="X")] * positions
         self.bought = []
 
     def daily_loss_hit(self):
@@ -354,16 +355,17 @@ class ApprovalBroker:
         return set()
 
     def order_size(self, cand):
-        return self.qty, 1.10
+        return self.qty, self.limit
 
     def buy(self, cand, reason):
         self.bought.append(cand.symbol)
 
 
 class ApprovingBuys(unittest.TestCase):
-    def run_entries(self, broker, answers, max_open=3):
+    def run_entries(self, broker, answers, max_open=3, auto=False):
         symbols = ["AAA", "BBB", "CCC"]
-        s = SimpleNamespace(watchlist=symbols, max_open_positions=max_open, approval_seconds=60)
+        s = SimpleNamespace(watchlist=symbols, max_open_positions=max_open, approval_seconds=60, auto_approve=auto,
+                            auto_approve_below=100.0)
         pick = lambda _t, _o, sym, *_: (
             Candidate(sym + "CONTRACT", 100.0, date.today() + timedelta(days=3), 1.08, 1.12, 0.3), None)
         strategy = bot.Strategy(signal=lambda _b, sym, _s: ("call", 100.0, f"{sym} setup"), pick=pick,
@@ -394,6 +396,30 @@ class ApprovingBuys(unittest.TestCase):
         ask = self.run_entries(broker, [True])
         self.assertEqual(broker.bought, ["AAACONTRACT"])
         self.assertEqual(ask.call_count, 1)
+
+    def test_auto_buys_contracts_under_the_limit_at_full_size_without_asking(self):
+        for qty, limit in [(1, 0.99), (10, 0.95)]:
+            with self.subTest(qty=qty, limit=limit):
+                broker = ApprovalBroker(qty=qty, limit=limit)
+                ask = self.run_entries(broker, [], auto=True)
+                self.assertEqual(ask.call_count, 0)
+                self.assertEqual(len(broker.bought), 3)
+
+    def test_auto_asks_at_or_above_the_limit(self):
+        for qty, limit in [(1, 1.00), (8, 1.10)]:
+            with self.subTest(qty=qty, limit=limit):
+                broker = ApprovalBroker(qty=qty, limit=limit)
+                ask = self.run_entries(broker, [False, False, False], auto=True)
+                self.assertEqual(ask.call_count, 3)
+                self.assertEqual(broker.bought, [])
+
+    def test_auto_still_respects_the_position_limit(self):
+        broker = ApprovalBroker(positions=2, qty=1, limit=0.50)
+        self.run_entries(broker, [], auto=True)
+        self.assertEqual(broker.bought, ["AAACONTRACT"])
+
+    def test_asking_is_the_default(self):
+        self.assertFalse(Settings().auto_approve)
 
     def test_dry_run_never_asks(self):
         broker = ApprovalBroker(live=False)

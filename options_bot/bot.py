@@ -99,8 +99,10 @@ def confirm_and_buy(broker, s, targets, open_count):
         if open_count >= s.max_open_positions:
             log.info("Max open positions (%d) reached; not asking about the rest.", s.max_open_positions)
             return
-        question = f"BUY {qty} x {cand.symbol} at {limit:.2f}, cost ${limit * 100 * qty:,.2f}?"
-        if broker.live_orders and not ask_yes_no(question, s.approval_seconds):
+        contract_cost = limit * 100
+        question = f"BUY {qty} x {cand.symbol} at {limit:.2f}, cost ${contract_cost * qty:,.2f}?"
+        auto = s.auto_approve and contract_cost < s.auto_approve_below
+        if broker.live_orders and not auto and not ask_yes_no(question, s.approval_seconds):
             log.info("NOT APPROVED %s", cand.symbol)
             continue
         broker.buy(cand, reason)

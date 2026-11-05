@@ -3,6 +3,7 @@
     python run_bot.py --once            # one cycle, dry-run (no orders)
     python run_bot.py                   # loop during market hours, dry-run
     python run_bot.py --trade           # loop and submit real PAPER orders
+    python run_bot.py --trade2 --auto   # same, but contracts under $100 each buy without asking
     python run_bot.py --dry2            # price-action patterns on 5m bars, dry-run (no orders)
     python run_bot.py --trade2          # price-action patterns; asks yes/no before each PAPER buy
 """
@@ -53,12 +54,16 @@ def main():
     mode.add_argument("--trade", action="store_true", help="SMA strategy: submit orders to the paper account (default: dry-run)")
     mode.add_argument("--trade2", action="store_true", help="price-action strategy: ask yes/no, then submit buys to the paper account")
     mode.add_argument("--dry2", action="store_true", help="price-action strategy: log only, no orders")
+    ap.add_argument("--auto", action="store_true", help="with --trade2: buy without asking if one contract costs under $100; otherwise ask")
     ap.add_argument("--once", action="store_true", help="run a single cycle, even if the market is closed")
     args = ap.parse_args()
+    if args.auto and not args.trade2:
+        ap.error("--auto only works with --trade2")
 
     setup_logging()
     log = logging.getLogger("bot")
     s = Settings()
+    s.auto_approve = args.auto
     s.validate()
     live = args.trade or args.trade2
     price_action = args.trade2 or args.dry2
@@ -66,9 +71,10 @@ def main():
     strategy = PRICE_ACTION if price_action else SMA
 
     acct = broker.account()
-    log.info("Account %s  equity $%s  options BP $%s  mode=%s  strategy=%s",
+    log.info("Account %s  equity $%s  options BP $%s  mode=%s  strategy=%s  buys=%s",
              acct.account_number, acct.equity, acct.options_buying_power,
-             "PAPER ORDERS" if live else "DRY-RUN", "price-action" if price_action else "SMA")
+             "PAPER ORDERS" if live else "DRY-RUN", "price-action" if price_action else "SMA",
+             "AUTO" if args.auto else "ask" if args.trade2 else "automatic" if args.trade else "none")
 
     if args.once:
         run_cycle(broker, s, strategy)
