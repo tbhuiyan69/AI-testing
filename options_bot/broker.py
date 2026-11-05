@@ -64,7 +64,8 @@ class Broker:
     # ---- actions -----------------------------------------------------------
     def order_size(self, cand):
         """Contracts and limit price a buy would use; qty is 0 if one contract is over the trade limit."""
-        return int(self.s.max_trade_dollars // (cand.ask * 100)), tick_round(cand.mid)
+        affordable = int(self.s.max_trade_dollars // (cand.ask * 100))
+        return min(affordable, self.s.max_contracts), tick_round(cand.mid)
 
     def buy(self, cand, reason):
         qty, limit = self.order_size(cand)

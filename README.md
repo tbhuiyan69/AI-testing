@@ -26,6 +26,8 @@ Logs go to `logs/bot.log`; every order (or dry-run order) is appended to `logs/t
    - Order: limit at mid, sized so one trade costs ≤ $1,000.
 3. **Guards**: max 3 open positions, no new entries after a 3% daily drawdown.
 
+The bot buys 1 contract per trade (`BOT_MAX_CONTRACTS`), and skips a contract costing over $1,000.
+
 All numbers are configurable; see `bot.env.example` (copy to `.env`).
 
 ## Price-action strategy (`--dry2`, `--trade2`)

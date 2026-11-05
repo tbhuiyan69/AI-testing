@@ -50,6 +50,7 @@ class Settings:
     min_open_interest: int = field(default_factory=lambda: _env("BOT_MIN_OPEN_INTEREST", 100, int))
 
     # Risk
+    max_contracts: int = field(default_factory=lambda: _env("BOT_MAX_CONTRACTS", 1, int))
     max_trade_dollars: float = field(default_factory=lambda: _env("BOT_MAX_TRADE_DOLLARS", 1000.0, float))
     max_open_positions: int = field(default_factory=lambda: _env("BOT_MAX_OPEN_POSITIONS", 3, int))
     daily_loss_limit_pct: float = field(default_factory=lambda: _env("BOT_DAILY_LOSS_LIMIT_PCT", 0.03, float))

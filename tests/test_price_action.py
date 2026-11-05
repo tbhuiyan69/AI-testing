@@ -270,6 +270,32 @@ class ProfitLock(unittest.TestCase):
         self.assertFalse(bot.PROFIT_LOCKS.is_locked("AAPL261120P00335000"))
 
 
+class OrderSize(unittest.TestCase):
+    def size(self, ask, max_contracts=1, max_dollars=1000.0):
+        b = Broker.__new__(Broker)
+        b.s = SimpleNamespace(max_contracts=max_contracts, max_trade_dollars=max_dollars)
+        return b.order_size(SimpleNamespace(ask=ask, mid=ask))[0]
+
+    def test_buys_one_contract_however_cheap(self):
+        for ask in (0.05, 0.31, 1.15, 9.99):
+            with self.subTest(ask):
+                self.assertEqual(self.size(ask), 1)
+
+    def test_skips_a_contract_over_the_trade_limit(self):
+        self.assertEqual(self.size(10.01), 0)
+
+    def test_default_limit_is_one(self):
+        self.assertEqual(Settings().max_contracts, 1)
+
+    def test_buy_sends_one_contract(self):
+        b = Broker.__new__(Broker)
+        b.s = SimpleNamespace(max_contracts=1, max_trade_dollars=1000.0)
+        sent = []
+        b._submit = lambda symbol, qty, side, limit, reason: sent.append(qty)
+        b.buy(SimpleNamespace(symbol="X", ask=0.31, mid=0.30), "why")
+        self.assertEqual(sent, [1])
+
+
 class ReplacingSells(unittest.TestCase):
     def broker(self, live, open_orders):
         calls = []
