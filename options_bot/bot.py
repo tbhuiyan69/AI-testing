@@ -65,22 +65,29 @@ def manage_exits(broker, s, strategy):
     positions = broker.option_positions()
     PROFIT_LOCKS.keep_only(p.symbol for p in positions)
     for p in positions:
-        plpc = float(p.unrealized_plpc or 0)
-        dte = days_to_expiry(p.symbol)
-        time_exit = strategy.time_exit(p.symbol, s)
-        take_profit = strategy.take_profit(p, s)
-        if time_exit and strategy.time_exit_at_market:
-            broker.close_now(p, time_exit)
-        elif take_profit and strategy.take_profit_at_market:
-            broker.close_now(p, take_profit)
-        elif take_profit:
-            broker.sell(p, take_profit)
-        elif plpc <= -s.stop_loss_pct:
-            broker.sell(p, f"stop loss {plpc:+.0%}")
-        elif time_exit:
-            broker.sell(p, time_exit)
-        else:
-            log.info("HOLD %s  P/L %+.0f%%  %s DTE", p.symbol, plpc * 100, dte)
+        try:
+            exit_position(broker, s, strategy, p)
+        except Exception as e:  # one rejected sell must not stop exit checks on the other positions
+            log.error("Exit failed for %s: %s", p.symbol, e)
+
+
+def exit_position(broker, s, strategy, p):
+    plpc = float(p.unrealized_plpc or 0)
+    dte = days_to_expiry(p.symbol)
+    time_exit = strategy.time_exit(p.symbol, s)
+    take_profit = strategy.take_profit(p, s)
+    if time_exit and strategy.time_exit_at_market:
+        broker.close_now(p, time_exit)
+    elif take_profit and strategy.take_profit_at_market:
+        broker.close_now(p, take_profit)
+    elif take_profit:
+        broker.sell(p, take_profit)
+    elif plpc <= -s.stop_loss_pct:
+        broker.sell(p, f"stop loss {plpc:+.0%}")
+    elif time_exit:
+        broker.sell(p, time_exit)
+    else:
+        log.info("HOLD %s  P/L %+.0f%%  %s DTE", p.symbol, plpc * 100, dte)
 
 
 def confirm_and_buy(broker, s, targets, open_count):

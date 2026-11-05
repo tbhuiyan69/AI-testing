@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+from alpaca.trading.enums import OrderSide, OrderType, PositionIntent
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -157,14 +158,14 @@ class FakeBroker:
 class Gates(unittest.TestCase):
     """Which combinations of pattern, momentum and P/C reach an order."""
 
-    def signal(self, ratio=2.0, momentum=True, live=True, bar_age_minutes=5):
+    def signal(self, ratio=2.0, momentum=True, live=True, bar_age_minutes=5, skip_momentum=False):
         df = SCENARIOS["QM Quick Retest"].copy()
         last_close = datetime.now(timezone.utc) - timedelta(minutes=bar_age_minutes)
         df.index = pd.date_range(end=last_close, periods=len(df), freq="5min")
         with (patch.object(pa, "fetch_5m", return_value=df),
               patch.object(pa, "pc_ratio", return_value=ratio),
               patch.object(pa, "momentum_confirms", return_value=momentum)):
-            return pa.price_action_signal(FakeBroker(live), "AAA", SimpleNamespace(poll_minutes=15))
+            return pa.price_action_signal(FakeBroker(live), "AAA", SimpleNamespace(skip_momentum=skip_momentum))
 
     def test_all_agree_gives_a_put(self):
         kind, _, reason = self.signal()
@@ -176,6 +177,13 @@ class Gates(unittest.TestCase):
         kind, _, reason = self.signal(momentum=False)
         self.assertIsNone(kind)
         self.assertIn("RSI/MACD", reason)
+
+    def test_skip_flag_ignores_momentum_only(self):
+        self.assertEqual(self.signal(momentum=False, skip_momentum=True)[0], "put")
+        self.assertIsNone(self.signal(momentum=False, skip_momentum=True, ratio=0.5)[0])
+
+    def test_momentum_check_is_on_by_default(self):
+        self.assertFalse(Settings().skip_momentum)
 
     def test_blocked_when_put_call_ratio_disagrees(self):
         for ratio in (0.5, 1.0):
@@ -257,6 +265,12 @@ class ProfitLock(unittest.TestCase):
     def test_unlocked_position_still_has_the_stop_loss(self):
         self.assertEqual(self.run_exits(position(-400, -0.40)), ([], ["stop loss -40%"]))
 
+    def test_file_error_never_stops_exit_checks_and_lock_still_holds(self):
+        with (patch("options_bot.profit_lock.os.replace", side_effect=PermissionError("in use")),
+              patch("options_bot.profit_lock.time.sleep")):
+            self.assertEqual(self.run_exits(position(20, 0.05)), ([], []))
+        self.assertEqual(self.run_exits(position(4, 0.01)), (["profit lock $+4.00"], []))
+
     def test_damaged_lock_file_starts_empty(self):
         self.path.write_text("not json", encoding="utf-8")
         self.assertFalse(ProfitLocks(self.path).is_locked("X"))
@@ -294,6 +308,47 @@ class OrderSize(unittest.TestCase):
         b._submit = lambda symbol, qty, side, limit, reason: sent.append(qty)
         b.buy(SimpleNamespace(symbol="X", ask=0.31, mid=0.30), "why")
         self.assertEqual(sent, [1])
+
+
+class OrderIntent(unittest.TestCase):
+    def submit(self, side, limit):
+        sent = []
+        b = Broker.__new__(Broker)
+        b.live_orders = True
+        b.trading = SimpleNamespace(submit_order=lambda req: sent.append(req) or SimpleNamespace(status="new"))
+        with patch.object(Broker, "_journal"):
+            b._submit("X261106P00015500", 2, side, limit, "why")
+        return sent[0]
+
+    def test_limit_and_market_sells_can_only_close(self):
+        for limit in (1.25, None):
+            with self.subTest(limit):
+                self.assertEqual(self.submit(OrderSide.SELL, limit).position_intent, PositionIntent.SELL_TO_CLOSE)
+
+    def test_buys_can_only_open(self):
+        self.assertEqual(self.submit(OrderSide.BUY, 1.25).position_intent, PositionIntent.BUY_TO_OPEN)
+
+    def test_market_close_does_not_use_close_position(self):
+        self.assertEqual(self.submit(OrderSide.SELL, None).type, OrderType.MARKET)
+
+
+class ExitFailures(unittest.TestCase):
+    def test_one_failed_sell_does_not_stop_the_next_position(self):
+        sold = []
+
+        def sell(p, why):
+            if p.symbol == "BAD":
+                raise RuntimeError("rejected")
+            sold.append(p.symbol)
+
+        positions = [SimpleNamespace(symbol=sym, unrealized_plpc="-0.50", unrealized_pl="-50") for sym in ("BAD", "GOOD")]
+        broker = SimpleNamespace(option_positions=lambda: positions, sell=sell)
+        s = SimpleNamespace(profit_lock_dollars=5.0, take_profit_pct=0.50, stop_loss_pct=0.35)
+        with (patch.object(bot, "PROFIT_LOCKS", ProfitLocks(Path(tempfile.mkdtemp()) / "locks.json")),
+              self.assertLogs("bot", "ERROR") as logs):
+            bot.manage_exits(broker, s, bot.PRICE_ACTION)
+        self.assertEqual(sold, ["GOOD"])
+        self.assertIn("Exit failed for BAD", logs.output[0])
 
 
 class ReplacingSells(unittest.TestCase):

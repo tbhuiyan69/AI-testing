@@ -9,8 +9,8 @@ from pathlib import Path
 
 from alpaca.data.historical import OptionHistoricalDataClient, StockHistoricalDataClient
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import AssetClass, OrderSide, QueryOrderStatus, TimeInForce
-from alpaca.trading.requests import GetOrdersRequest, LimitOrderRequest
+from alpaca.trading.enums import AssetClass, OrderSide, PositionIntent, QueryOrderStatus, TimeInForce
+from alpaca.trading.requests import GetOrdersRequest, LimitOrderRequest, MarketOrderRequest
 
 log = logging.getLogger("bot")
 JOURNAL = Path(__file__).resolve().parent.parent / "logs" / "trades.csv"
@@ -105,14 +105,14 @@ class Broker:
         log.info("%s %s %d x %s @ %s  (%s)", tag, side.value.upper(), qty, symbol, limit or "MKT", reason)
         status = "dry-run"
         if self.live_orders:
+            # Alpaca rejects an intent that doesn't match the account, so a sell can never open a short.
+            intent = PositionIntent.SELL_TO_CLOSE if side == OrderSide.SELL else PositionIntent.BUY_TO_OPEN
+            common = dict(symbol=symbol, qty=qty, side=side, time_in_force=TimeInForce.DAY, position_intent=intent)
             if limit is None:
-                self.trading.close_position(symbol)
-                status = "submitted"
+                order = self.trading.submit_order(MarketOrderRequest(**common))
             else:
-                order = self.trading.submit_order(LimitOrderRequest(
-                    symbol=symbol, qty=qty, side=side, limit_price=limit, time_in_force=TimeInForce.DAY,
-                ))
-                status = str(order.status.value if hasattr(order.status, "value") else order.status)
+                order = self.trading.submit_order(LimitOrderRequest(limit_price=limit, **common))
+            status = str(order.status.value if hasattr(order.status, "value") else order.status)
         self._journal(symbol, side.value, qty, limit, reason, status)
 
     def _journal(self, symbol, side, qty, limit, reason, status):

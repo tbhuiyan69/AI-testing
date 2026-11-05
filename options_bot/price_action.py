@@ -327,7 +327,7 @@ def price_action_signal(broker, symbol, s):
     if not setup:
         return None, price, None
     label = f"{setup.pattern} {setup.kind}, stop {setup.stop:.2f}"
-    if not momentum_confirms(df, setup.kind):
+    if not s.skip_momentum and not momentum_confirms(df, setup.kind):
         return None, price, f"{label}, blocked: RSI/MACD disagree"
     ratio = pc_ratio(broker.trading, symbol, price, 0, MAX_CAPPED_DTE)
     if ratio is None:

@@ -9,7 +9,7 @@ import argparse
 
 from alpaca.data.enums import OptionsFeed
 from alpaca.data.requests import OptionSnapshotRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.enums import OrderSide, PositionIntent, TimeInForce
 from alpaca.trading.requests import LimitOrderRequest
 
 from options_bot.broker import Broker, tick_round
@@ -55,7 +55,8 @@ def main():
         return
 
     order = b.trading.submit_order(LimitOrderRequest(
-        symbol=symbol, qty=a.qty, side=side, limit_price=limit, time_in_force=TimeInForce.DAY))
+        symbol=symbol, qty=a.qty, side=side, limit_price=limit, time_in_force=TimeInForce.DAY,
+        position_intent=PositionIntent.SELL_TO_CLOSE if a.sell else PositionIntent.BUY_TO_OPEN))
     print(f"  Submitted: id {order.id}  status {order.status}")
 
 

@@ -11,6 +11,7 @@ python run_bot.py --once     # one cycle, dry-run: logs what it would do, places
 python run_bot.py            # loop every 15 min during market hours, dry-run
 python run_bot.py --trade    # loop and submit real paper orders
 python run_bot.py --trade2 --auto   # same, but contracts under $100 each (`BOT_AUTO_APPROVE_BELOW`) buy without asking
+python run_bot.py --trade2 --skip-rsi-macd   # ignore the RSI/MACD check for this run
 python run_bot.py --dry2     # price-action strategy, log only
 python run_bot.py --trade2   # price-action strategy, asks yes/no before each paper buy
 ```
@@ -27,6 +28,8 @@ Logs go to `logs/bot.log`; every order (or dry-run order) is appended to `logs/t
 3. **Guards**: max 3 open positions, no new entries after a 3% daily drawdown.
 
 The bot buys 1 contract per trade (`BOT_MAX_CONTRACTS`), and skips a contract costing over $1,000.
+
+Bot sells are sent as sell-to-close, so Alpaca rejects one that would open a short position.
 
 All numbers are configurable; see `bot.env.example` (copy to `.env`).
 
