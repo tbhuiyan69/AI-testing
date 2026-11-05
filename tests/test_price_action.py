@@ -1,5 +1,6 @@
 """Run with: python -m unittest discover tests"""
 import sys
+import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from options_bot import bot, contracts, price_action as pa
 from options_bot.approval import ask_yes_no
 from options_bot.broker import Broker
+from options_bot.profit_lock import ProfitLocks
 from options_bot.config import Settings
 from options_bot.contracts import Candidate, premium_cap, within_premium_cap
 from options_bot.price_action import detect, momentum_confirms, pivots
@@ -205,38 +207,67 @@ def position(pl, plpc, symbol="AAPL261120P00335000", qty="2"):
                            qty_available="0", current_price="1.25")
 
 
-class QuickTakeProfit(unittest.TestCase):
-    s = SimpleNamespace(quick_profit_dollars=5.0, quick_profit_pct=0.03, take_profit_pct=0.50, stop_loss_pct=0.35)
+class ProfitLock(unittest.TestCase):
+    s = SimpleNamespace(profit_lock_dollars=5.0, take_profit_pct=0.50, stop_loss_pct=0.35, exit_dte=7)
 
-    def test_more_than_either_target_takes_profit(self):
-        for pl, plpc in [(5.00, 0.01), (5.01, 0.01), (1.00, 0.031), (50.00, 0.20)]:
-            with self.subTest(pl=pl, plpc=plpc):
-                self.assertIn("take profit", bot.quick_take_profit(position(pl, plpc), self.s))
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = Path(self.dir.name) / "locks.json"
+        patcher = patch.object(bot, "PROFIT_LOCKS", ProfitLocks(self.path))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-    def test_at_or_below_both_targets_holds(self):
-        for pl, plpc in [(4.99, 0.03), (0, 0), (-5, -0.02)]:
-            with self.subTest(pl=pl, plpc=plpc):
-                self.assertIsNone(bot.quick_take_profit(position(pl, plpc), self.s))
-
-    def run_exits(self, strategy, p):
-        sold = []
-        broker = SimpleNamespace(option_positions=lambda: [p], sell=lambda _, why: sold.append(why))
+    def run_exits(self, p, strategy=bot.PRICE_ACTION):
+        closed, sold, holds = [], [], []
+        broker = SimpleNamespace(option_positions=lambda: [p] if p else [],
+                                 close_now=lambda _, why: closed.append(why),
+                                 sell=lambda _, why: sold.append(why))
         bot.manage_exits(broker, self.s, strategy)
-        return sold
+        return closed, sold
 
-    def test_price_action_sells_at_the_quick_target(self):
-        sold = self.run_exits(bot.PRICE_ACTION, position(12.00, 0.02))
-        self.assertEqual(sold, ["take profit $+12.00 (+2.0%)"])
+    def test_below_target_keeps_running(self):
+        for pl in (4.99, 5.00, 0, -50):
+            with self.subTest(pl):
+                self.assertEqual(self.run_exits(position(pl, 0.01)), ([], []))
 
-    def test_default_dollar_target_is_five(self):
-        self.assertEqual(Settings().quick_profit_dollars, 5.0)
+    def test_above_target_locks_and_keeps_running_with_no_cap(self):
+        self.assertEqual(self.run_exits(position(5.01, 0.01)), ([], []))
+        self.assertEqual(self.run_exits(position(500, 0.60)), ([], []))
+        self.assertEqual(self.run_exits(position(5000, 6.00)), ([], []))
+
+    def test_falling_back_to_target_after_lock_sells_at_market(self):
+        self.run_exits(position(20, 0.05))
+        self.assertEqual(self.run_exits(position(5.00, 0.01)), (["profit lock $+5.00"], []))
+
+    def test_falling_past_target_after_lock_still_sells(self):
+        self.run_exits(position(20, 0.05))
+        self.assertEqual(self.run_exits(position(-3, -0.01)), (["profit lock $-3.00"], []))
+
+    def test_lock_survives_a_restart(self):
+        self.run_exits(position(20, 0.05))
+        with patch.object(bot, "PROFIT_LOCKS", ProfitLocks(self.path)):
+            self.assertEqual(self.run_exits(position(4, 0.01)), (["profit lock $+4.00"], []))
+
+    def test_closed_position_forgets_its_lock(self):
+        self.run_exits(position(20, 0.05))
+        self.run_exits(None)
+        self.assertEqual(self.run_exits(position(4, 0.01)), ([], []))
+
+    def test_unlocked_position_still_has_the_stop_loss(self):
+        self.assertEqual(self.run_exits(position(-400, -0.40)), ([], ["stop loss -40%"]))
+
+    def test_damaged_lock_file_starts_empty(self):
+        self.path.write_text("not json", encoding="utf-8")
+        self.assertFalse(ProfitLocks(self.path).is_locked("X"))
+
+    def test_default_target_is_five(self):
+        self.assertEqual(Settings().profit_lock_dollars, 5.0)
 
     def test_sma_strategy_still_waits_for_fifty_percent(self):
-        s = SimpleNamespace(**vars(self.s), exit_dte=7)
-        sold = []
-        broker = SimpleNamespace(option_positions=lambda: [position(12.00, 0.02)], sell=lambda _, why: sold.append(why))
-        bot.manage_exits(broker, s, bot.SMA)
-        self.assertEqual(sold, [])
+        self.assertEqual(self.run_exits(position(120, 0.20), bot.SMA), ([], []))
+        self.assertEqual(self.run_exits(position(500, 0.60), bot.SMA), ([], ["take profit +60%"]))
+        self.assertFalse(bot.PROFIT_LOCKS.is_locked("AAPL261120P00335000"))
 
 
 class ReplacingSells(unittest.TestCase):
@@ -480,8 +511,9 @@ class SameDayTiming(unittest.TestCase):
         broker = SimpleNamespace(option_positions=lambda: [position],
                                  close_now=lambda p, why: closed.append(why),
                                  sell=lambda p, why: sold.append(why))
-        s = QuickTakeProfit.s
-        with patch.object(pd.Timestamp, "now", return_value=eastern(15, 20)):
+        s = ProfitLock.s
+        with (patch.object(pd.Timestamp, "now", return_value=eastern(15, 20)),
+              patch.object(bot, "PROFIT_LOCKS", ProfitLocks(Path(tempfile.mkdtemp()) / "locks.json"))):
             bot.manage_exits(broker, s, bot.PRICE_ACTION)
         self.assertEqual((closed, sold), (["expiry-day exit"], []))
 

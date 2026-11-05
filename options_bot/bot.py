@@ -7,9 +7,11 @@ from .approval import ask_yes_no
 from .broker import days_to_expiry
 from .contracts import pick_capped_contract, pick_contract
 from .price_action import expiry_day_exit, price_action_signal
+from .profit_lock import ProfitLocks
 from .strategy import signal_for
 
 log = logging.getLogger("bot")
+PROFIT_LOCKS = ProfitLocks()
 
 
 def dte_exit(symbol, s):
@@ -22,11 +24,17 @@ def pct_take_profit(p, s):
     return f"take profit {plpc:+.0%}" if plpc >= s.take_profit_pct else None
 
 
-def quick_take_profit(p, s):
-    """Take profit on reaching the dollar target or passing the percent target, whichever comes first."""
-    pl, plpc = float(p.unrealized_pl or 0), float(p.unrealized_plpc or 0)
-    if pl >= s.quick_profit_dollars or plpc > s.quick_profit_pct:
-        return f"take profit ${pl:+.2f} ({plpc:+.1%})"
+def profit_lock_exit(p, s):
+    """No profit cap: once a position is above the target, sell only if it falls back to the target."""
+    pl = float(p.unrealized_pl or 0)
+    if pl > s.profit_lock_dollars:
+        if not PROFIT_LOCKS.is_locked(p.symbol):
+            PROFIT_LOCKS.lock(p.symbol)
+            log.info("PROFIT LOCK %s at $%.2f profit; will sell if it falls to $%.2f",
+                     p.symbol, pl, s.profit_lock_dollars)
+        return None
+    if PROFIT_LOCKS.is_locked(p.symbol):
+        return f"profit lock ${pl:+.2f}"
     return None
 
 
@@ -43,23 +51,28 @@ class Strategy:
     time_exit_at_market: bool = False
     show_blocked: bool = False
     take_profit: Callable = pct_take_profit
+    take_profit_at_market: bool = False
     confirm_buys: bool = False
 
 
 SMA = Strategy(sma_signal, pick_contract, dte_exit)
 PRICE_ACTION = Strategy(price_action_signal, pick_capped_contract, expiry_day_exit,
-                        time_exit_at_market=True, show_blocked=True, take_profit=quick_take_profit,
-                        confirm_buys=True)
+                        time_exit_at_market=True, show_blocked=True, take_profit=profit_lock_exit,
+                        take_profit_at_market=True, confirm_buys=True)
 
 
 def manage_exits(broker, s, strategy):
-    for p in broker.option_positions():
+    positions = broker.option_positions()
+    PROFIT_LOCKS.keep_only(p.symbol for p in positions)
+    for p in positions:
         plpc = float(p.unrealized_plpc or 0)
         dte = days_to_expiry(p.symbol)
         time_exit = strategy.time_exit(p.symbol, s)
         take_profit = strategy.take_profit(p, s)
         if time_exit and strategy.time_exit_at_market:
             broker.close_now(p, time_exit)
+        elif take_profit and strategy.take_profit_at_market:
+            broker.close_now(p, take_profit)
         elif take_profit:
             broker.sell(p, take_profit)
         elif plpc <= -s.stop_loss_pct:
