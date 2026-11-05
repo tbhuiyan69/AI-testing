@@ -23,9 +23,9 @@ def pct_take_profit(p, s):
 
 
 def quick_take_profit(p, s):
-    """Take profit on more than the dollar target or more than the percent target, whichever comes first."""
+    """Take profit on reaching the dollar target or passing the percent target, whichever comes first."""
     pl, plpc = float(p.unrealized_pl or 0), float(p.unrealized_plpc or 0)
-    if pl > s.quick_profit_dollars or plpc > s.quick_profit_pct:
+    if pl >= s.quick_profit_dollars or plpc > s.quick_profit_pct:
         return f"take profit ${pl:+.2f} ({plpc:+.1%})"
     return None
 

@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from options_bot import bot, contracts, price_action as pa
 from options_bot.approval import ask_yes_no
 from options_bot.broker import Broker
+from options_bot.config import Settings
 from options_bot.contracts import Candidate, premium_cap, within_premium_cap
 from options_bot.price_action import detect, momentum_confirms, pivots
 from price_action_use_cases import CASES
@@ -205,15 +206,15 @@ def position(pl, plpc, symbol="AAPL261120P00335000", qty="2"):
 
 
 class QuickTakeProfit(unittest.TestCase):
-    s = SimpleNamespace(quick_profit_dollars=10.0, quick_profit_pct=0.03, take_profit_pct=0.50, stop_loss_pct=0.35)
+    s = SimpleNamespace(quick_profit_dollars=5.0, quick_profit_pct=0.03, take_profit_pct=0.50, stop_loss_pct=0.35)
 
     def test_more_than_either_target_takes_profit(self):
-        for pl, plpc in [(10.01, 0.01), (1.00, 0.031), (50.00, 0.20)]:
+        for pl, plpc in [(5.00, 0.01), (5.01, 0.01), (1.00, 0.031), (50.00, 0.20)]:
             with self.subTest(pl=pl, plpc=plpc):
                 self.assertIn("take profit", bot.quick_take_profit(position(pl, plpc), self.s))
 
     def test_at_or_below_both_targets_holds(self):
-        for pl, plpc in [(10.00, 0.03), (0, 0), (-5, -0.02)]:
+        for pl, plpc in [(4.99, 0.03), (0, 0), (-5, -0.02)]:
             with self.subTest(pl=pl, plpc=plpc):
                 self.assertIsNone(bot.quick_take_profit(position(pl, plpc), self.s))
 
@@ -226,6 +227,9 @@ class QuickTakeProfit(unittest.TestCase):
     def test_price_action_sells_at_the_quick_target(self):
         sold = self.run_exits(bot.PRICE_ACTION, position(12.00, 0.02))
         self.assertEqual(sold, ["take profit $+12.00 (+2.0%)"])
+
+    def test_default_dollar_target_is_five(self):
+        self.assertEqual(Settings().quick_profit_dollars, 5.0)
 
     def test_sma_strategy_still_waits_for_fifty_percent(self):
         s = SimpleNamespace(**vars(self.s), exit_dte=7)
