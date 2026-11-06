@@ -9,6 +9,7 @@ from .contracts import pick_capped_contract, pick_contract
 from .price_action import expiry_day_exit, price_action_signal
 from .profit_lock import ProfitLocks
 from .strategy import signal_for
+from .zone_strategy import remember_levels, zone_level_exit, zone_signal
 
 log = logging.getLogger("bot")
 PROFIT_LOCKS = ProfitLocks()
@@ -38,6 +39,10 @@ def profit_lock_exit(p, s):
     return None
 
 
+def no_take_profit(p, s):
+    return None
+
+
 def default_stop_loss(s):
     return s.stop_loss_pct
 
@@ -62,12 +67,17 @@ class Strategy:
     take_profit_at_market: bool = False
     confirm_buys: bool = False
     stop_loss: Callable = default_stop_loss
+    level_exit: Callable | None = None
+    after_buy: Callable | None = None
 
 
 SMA = Strategy(sma_signal, pick_contract, dte_exit)
 PRICE_ACTION = Strategy(price_action_signal, pick_capped_contract, expiry_day_exit,
                         time_exit_at_market=True, show_blocked=True, take_profit=profit_lock_exit,
                         take_profit_at_market=True, confirm_buys=True, stop_loss=short_dte_stop_loss)
+ZONES = Strategy(zone_signal, pick_capped_contract, expiry_day_exit, time_exit_at_market=True,
+                 show_blocked=True, take_profit=no_take_profit, confirm_buys=True,
+                 stop_loss=short_dte_stop_loss, level_exit=zone_level_exit, after_buy=remember_levels)
 
 
 def manage_exits(broker, s, strategy):
@@ -85,8 +95,11 @@ def exit_position(broker, s, strategy, p):
     dte = days_to_expiry(p.symbol)
     time_exit = strategy.time_exit(p.symbol, s)
     take_profit = strategy.take_profit(p, s)
+    level_exit = strategy.level_exit(broker, p, s) if strategy.level_exit else None
     if time_exit and strategy.time_exit_at_market:
         broker.close_now(p, time_exit)
+    elif level_exit:
+        broker.close_now(p, level_exit)
     elif take_profit and strategy.take_profit_at_market:
         broker.close_now(p, take_profit)
     elif take_profit:
@@ -99,7 +112,7 @@ def exit_position(broker, s, strategy, p):
         log.info("HOLD %s  P/L %+.0f%%  %s DTE", p.symbol, plpc * 100, dte)
 
 
-def confirm_and_buy(broker, s, targets, open_count):
+def confirm_and_buy(broker, s, targets, open_count, strategy):
     """List every contract the bot wants to buy with its price, then ask about each one."""
     log.info("TARGETS: %d contract(s) ready to buy", len(targets))
     for cand, reason in targets:
@@ -122,6 +135,8 @@ def confirm_and_buy(broker, s, targets, open_count):
             log.info("NOT APPROVED %s", cand.symbol)
             continue
         broker.buy(cand, reason)
+        if broker.live_orders and strategy.after_buy:
+            strategy.after_buy(cand)
         open_count += 1
 
 
@@ -161,7 +176,7 @@ def look_for_entries(broker, s, strategy):
         open_count += 1
 
     if targets:
-        confirm_and_buy(broker, s, targets, open_count)
+        confirm_and_buy(broker, s, targets, open_count, strategy)
 
 
 def run_cycle(broker, s, strategy=SMA, entries=True):

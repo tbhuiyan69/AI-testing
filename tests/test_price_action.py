@@ -17,6 +17,8 @@ from options_bot import bot, contracts, price_action as pa
 from options_bot.approval import ask_yes_no
 from options_bot.broker import Broker
 from options_bot.profit_lock import ProfitLocks
+from options_bot.zone_strategy import Strategy3Config, ZoneLevels, detect_zone_break, find_zones
+from options_bot import zone_strategy as zs
 from options_bot.config import Settings
 from options_bot.contracts import Candidate, premium_cap, within_premium_cap
 from options_bot.price_action import detect, momentum_confirms, pivots
@@ -120,31 +122,238 @@ class Patterns(unittest.TestCase):
         self.assertTrue(all(a != b for a, b in zip(kinds, kinds[1:])))
 
 
+def v_shape(down=120, up=60):
+    return frame(list(np.linspace(300, 240, down)) + list(np.linspace(240, 270, up + 1)[1:]))
+
+
+class MacdSequence(unittest.TestCase):
+    start = pd.Timestamp("2026-11-05 10:00", tz="America/New_York")
+
+    def at(self, minutes):
+        return self.start + pd.Timedelta(minutes=minutes)
+
+    def in_order(self, t5, t10, t15, now):
+        return pa.crosses_in_sequence(self.at(t5), self.at(t10), self.at(t15), self.at(now))
+
+    def test_five_then_ten_then_fifteen_passes(self):
+        self.assertTrue(self.in_order(0, 10, 15, 15))
+        self.assertTrue(self.in_order(0, 0, 0, 0))
+
+    def test_wrong_order_fails(self):
+        self.assertFalse(self.in_order(10, 0, 15, 15))
+        self.assertFalse(self.in_order(0, 20, 15, 20))
+        self.assertFalse(self.in_order(20, 10, 15, 20))
+
+    def test_old_fifteen_minute_cross_fails(self):
+        self.assertTrue(self.in_order(0, 10, 15, 45))
+        self.assertFalse(self.in_order(0, 10, 15, 50))
+
+    def test_crosses_too_far_apart_fail(self):
+        self.assertTrue(self.in_order(0, 60, 120, 120))
+        self.assertFalse(self.in_order(0, 60, 125, 125))
+
+    def first_pass(self, df, kind):
+        for end in range(100, len(df) + 1):
+            if pa.macd_sequence_confirmed(df.iloc[:end], kind):
+                return end
+        return None
+
+    def test_turn_up_confirms_a_call_after_the_low_not_at_it(self):
+        df = v_shape()
+        end = self.first_pass(df, "call")
+        self.assertIsNotNone(end)
+        self.assertGreater(end, 120)
+        self.assertIsNone(self.first_pass(df, "put"))
+
+    def test_turn_down_confirms_a_put(self):
+        df = flip(v_shape())
+        self.assertIsNotNone(self.first_pass(df, "put"))
+        self.assertIsNone(self.first_pass(df, "call"))
+
+    def test_only_a_five_minute_cross_so_far_does_not_pass(self):
+        df = v_shape()
+        five_only = next(end for end in range(121, len(df)) if pa._last_macd_cross(df.close.iloc[:end], 5)[1])
+        self.assertFalse(pa.macd_sequence_confirmed(df.iloc[:five_only], "call"))
+
+    def test_long_finished_move_no_longer_passes(self):
+        self.assertFalse(pa.macd_sequence_confirmed(v_shape(up=120), "call"))
+
+    def test_too_few_bars_does_not_pass(self):
+        self.assertFalse(pa.macd_sequence_confirmed(v_shape().iloc[:20], "call"))
+
+
 class Momentum(unittest.TestCase):
     def falling(self):
         return frame(list(np.linspace(240, 255, 60)) + list(np.linspace(255, 240, 30)))
 
-    def test_falling_price_confirms_put_only(self):
-        df = self.falling()
-        self.assertTrue(momentum_confirms(df, df, "put"))
-        self.assertFalse(momentum_confirms(df, df, "call"))
+    def confirms(self, df_1m, kind, sequence=True):
+        with patch.object(pa, "macd_sequence_confirmed", return_value=sequence):
+            return momentum_confirms(self.falling(), df_1m, kind)
 
-    def test_rising_price_confirms_call_only(self):
-        df = flip(self.falling())
-        self.assertTrue(momentum_confirms(df, df, "call"))
-        self.assertFalse(momentum_confirms(df, df, "put"))
+    def test_falling_one_minute_rsi_backs_a_put_only(self):
+        self.assertTrue(self.confirms(self.falling(), "put"))
+        self.assertFalse(self.confirms(self.falling(), "call"))
 
-    def test_rsi_comes_from_the_one_minute_bars(self):
-        df, rising_1m = self.falling(), flip(self.falling())
-        self.assertFalse(momentum_confirms(df, rising_1m, "put"))
+    def test_rising_one_minute_rsi_backs_a_call_only(self):
+        self.assertTrue(self.confirms(flip(self.falling()), "call"))
+        self.assertFalse(self.confirms(flip(self.falling()), "put"))
 
-    def test_macd_comes_from_the_five_minute_bars(self):
-        df, falling_1m = flip(self.falling()), self.falling()
-        self.assertFalse(momentum_confirms(df, falling_1m, "put"))
+    def test_blocked_without_the_macd_sequence(self):
+        self.assertFalse(self.confirms(self.falling(), "put", sequence=False))
 
     def test_too_few_one_minute_bars_blocks_the_trade(self):
-        df = self.falling()
-        self.assertFalse(momentum_confirms(df, df.iloc[-29:], "put"))
+        self.assertFalse(self.confirms(self.falling().iloc[-29:], "put"))
+
+
+def bars(*rows):
+    idx = pd.date_range("2026-11-03 09:30", periods=len(rows), freq="5min", tz="America/New_York")
+    return pd.DataFrame(rows, columns=["open", "high", "low", "close"], index=idx)
+
+
+def rising(start, count, step=0.5):
+    return [(start + i * step, start + i * step + 0.3, start + i * step - 0.1, start + i * step + 0.2) for i in range(count)]
+
+
+def zone_setup():
+    """A swing high with a wick zone of 110.00-111.00, a pullback, a touch, then a close above it."""
+    rows = rising(100, 20)
+    rows += [(109.8, 111.0, 109.6, 110.0)]  # swing high: body top 110.0, wick high 111.0
+    rows += [(110.0, 110.2, 108.5, 108.6), (108.6, 108.8, 107.5, 107.6), (107.6, 107.8, 106.5, 106.6),
+             (106.6, 106.8, 106.0, 106.2), (106.2, 107.5, 106.1, 107.4), (107.4, 109.0, 107.3, 108.9)]
+    rows += [(108.9, 110.4, 108.8, 110.3)]  # touches the zone and closes inside it
+    rows += [(110.3, 112.0, 110.2, 111.8)]  # first close above the zone, green
+    return bars(*rows)
+
+
+def flip_bars(df):
+    out = pd.DataFrame(index=df.index)
+    out["open"], out["high"], out["low"], out["close"] = 500 - df.open, 500 - df.low, 500 - df.high, 500 - df.close
+    return out
+
+
+class ZoneDetection(unittest.TestCase):
+    def test_swing_high_zone_runs_from_body_top_to_wick_high(self):
+        self.assertTrue(any(z.bottom == 110.0 and z.top == 111.0 for z in find_zones(zone_setup(), 3)))
+
+    def test_touch_then_close_above_buys_a_call_with_stop_below_the_zone(self):
+        sig = detect_zone_break(zone_setup())
+        self.assertEqual((sig.side, sig.kind, sig.entry), ("long", "call", 111.8))
+        self.assertLess(sig.stop, 110.0)
+        self.assertGreater(sig.target, sig.entry)
+        self.assertGreaterEqual(sig.reward_risk, 1.5)
+
+    def test_touch_then_close_below_buys_a_put_with_stop_above_the_zone(self):
+        sig = detect_zone_break(flip_bars(zone_setup()))
+        self.assertEqual((sig.side, sig.kind), ("short", "put"))
+        self.assertGreater(sig.stop, sig.entry)
+        self.assertLess(sig.target, sig.entry)
+
+    def test_target_falls_back_to_two_r_without_a_zone_beyond(self):
+        sig = detect_zone_break(zone_setup())
+        self.assertAlmostEqual(sig.reward_risk, 2.0)
+
+    def test_next_zone_is_the_target_when_far_enough(self):
+        far = Strategy3Config()
+        df = zone_setup()
+        with patch.object(zs, "find_zones", side_effect=lambda d, k: find_zones(d, k) + [zs.Zone(125.0, 126.0, 5)]):
+            sig = detect_zone_break(df, far)
+        self.assertEqual(sig.target, 125.0)
+
+    def test_second_close_outside_is_not_a_new_entry(self):
+        df = zone_setup()
+        last = df.iloc[-1]
+        again = bars(*[tuple(r) for r in df.itertuples(index=False)], (last.close, 113.0, 111.7, 112.8))
+        self.assertIsNone(detect_zone_break(again))
+
+    def test_red_close_above_is_not_an_entry(self):
+        rows = [tuple(r) for r in zone_setup().itertuples(index=False)]
+        rows[-1] = (112.5, 112.6, 110.2, 111.8)
+        self.assertIsNone(detect_zone_break(bars(*rows)))
+
+    def test_close_outside_without_a_touch_is_not_an_entry(self):
+        rows = [tuple(r) for r in zone_setup().itertuples(index=False)]
+        rows[-2] = (108.9, 109.5, 108.8, 109.4)  # stops short of the zone
+        rows[-1] = (109.4, 112.0, 109.3, 111.8)
+        self.assertIsNone(detect_zone_break(bars(*rows)))
+
+    def test_too_few_bars_has_no_setup(self):
+        self.assertIsNone(detect_zone_break(zone_setup().iloc[:10]))
+
+
+class ZoneExits(unittest.TestCase):
+    CALL = "AAA261106C00100000"
+    PUT = "AAA261106P00100000"
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.path = Path(d.name) / "levels.json"
+        patcher = patch.object(zs, "ZONE_LEVELS", ZoneLevels(self.path))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def exit_at(self, contract, price):
+        stocks = SimpleNamespace(get_stock_latest_trade=lambda req: {"AAA": SimpleNamespace(price=price)})
+        return zs.zone_level_exit(SimpleNamespace(stocks=stocks), SimpleNamespace(symbol=contract), None)
+
+    def test_call_sells_at_stop_or_target_only(self):
+        zs.ZONE_LEVELS.set(self.CALL, "call", 95.0, 110.0)
+        self.assertIn("zone stop", self.exit_at(self.CALL, 95.0))
+        self.assertIn("zone target", self.exit_at(self.CALL, 110.0))
+        self.assertIsNone(self.exit_at(self.CALL, 100.0))
+
+    def test_put_levels_are_mirrored(self):
+        zs.ZONE_LEVELS.set(self.PUT, "put", 105.0, 90.0)
+        self.assertIn("zone stop", self.exit_at(self.PUT, 105.0))
+        self.assertIn("zone target", self.exit_at(self.PUT, 90.0))
+        self.assertIsNone(self.exit_at(self.PUT, 100.0))
+
+    def test_position_without_levels_has_no_zone_exit(self):
+        self.assertIsNone(self.exit_at(self.CALL, 1.0))
+
+    def test_levels_survive_a_restart(self):
+        zs.ZONE_LEVELS.set(self.CALL, "call", 95.0, 110.0)
+        self.assertEqual(ZoneLevels(self.path).get(self.CALL)["stop"], 95.0)
+
+    def test_price_error_does_not_stop_exit_checks(self):
+        zs.ZONE_LEVELS.set(self.CALL, "call", 95.0, 110.0)
+        def fail(req):
+            raise RuntimeError("no data")
+        broker = SimpleNamespace(stocks=SimpleNamespace(get_stock_latest_trade=fail))
+        self.assertIsNone(zs.zone_level_exit(broker, SimpleNamespace(symbol=self.CALL), None))
+
+    def test_bought_contract_saves_the_latest_signal(self):
+        zs._pending[("AAA", "call")] = zs.ZoneSignal("long", 100.0, 95.0, 110.0, zs.Zone(96.0, 97.0, 1))
+        self.addCleanup(zs._pending.clear)
+        zs.remember_levels(SimpleNamespace(symbol=self.CALL))
+        self.assertEqual(zs.ZONE_LEVELS.get(self.CALL), {"kind": "call", "stop": 95.0, "target": 110.0})
+
+    def test_strategy_sells_at_market_on_the_level_and_has_no_profit_cap(self):
+        closed, sold = [], []
+        position = SimpleNamespace(symbol=self.CALL, unrealized_plpc="3.00", unrealized_pl="300")
+        broker = SimpleNamespace(option_positions=lambda: [position], close_now=lambda _, why: closed.append(why),
+                                 sell=lambda _, why: sold.append(why))
+        s = SimpleNamespace(short_dte_stop_loss_pct=0.50)
+        with patch.object(bot, "PROFIT_LOCKS", ProfitLocks(Path(tempfile.mkdtemp()) / "l.json")):
+            strategy = bot.Strategy(bot.ZONES.signal, bot.ZONES.pick, lambda *_: None, take_profit=bot.no_take_profit,
+                                    stop_loss=bot.short_dte_stop_loss, level_exit=lambda *_: "zone target, AAA 110.00")
+            bot.manage_exits(broker, s, strategy)
+            self.assertEqual((closed, sold), (["zone target, AAA 110.00"], []))
+            closed.clear()
+            quiet = bot.Strategy(bot.ZONES.signal, bot.ZONES.pick, lambda *_: None, take_profit=bot.no_take_profit,
+                                 stop_loss=bot.short_dte_stop_loss, level_exit=lambda *_: None)
+            bot.manage_exits(broker, s, quiet)
+        self.assertEqual((closed, sold), ([], []))
+
+    def test_option_stop_still_applies(self):
+        sold = []
+        position = SimpleNamespace(symbol=self.CALL, unrealized_plpc="-0.50", unrealized_pl="-50")
+        broker = SimpleNamespace(option_positions=lambda: [position], sell=lambda _, why: sold.append(why))
+        strategy = bot.Strategy(bot.ZONES.signal, bot.ZONES.pick, lambda *_: None, take_profit=bot.no_take_profit,
+                                stop_loss=bot.short_dte_stop_loss, level_exit=lambda *_: None)
+        with patch.object(bot, "PROFIT_LOCKS", ProfitLocks(Path(tempfile.mkdtemp()) / "l.json")):
+            bot.manage_exits(broker, SimpleNamespace(short_dte_stop_loss_pct=0.50), strategy)
+        self.assertEqual(sold, ["stop loss -50%"])
 
 
 class FakeBroker:

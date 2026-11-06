@@ -22,6 +22,9 @@ BAR_MINUTES = 5
 STALE_MINUTES = 15
 MIN_BARS = 60
 MIN_RSI_BARS = 30
+MACD_WARMUP_BARS = 35  # MACD and its signal line aren't settled before this many bars
+MACD_SEQUENCE_SPAN = pd.Timedelta(hours=2)  # most time from the 5m cross to the 15m cross
+MACD_SEQUENCE_MAX_AGE = pd.Timedelta(minutes=30)  # the 15m cross must be this recent
 PIVOT_K = 2
 SCAN_BARS = 40  # how far back a spike or break may be and still count
 TOL_ATR = 0.25  # levels within this many ATRs count as the same level
@@ -278,19 +281,42 @@ def _rsi_agrees(close, kind):
     return rsi.iloc[-1] < rsi_avg.iloc[-1] if kind == "put" else rsi.iloc[-1] > rsi_avg.iloc[-1]
 
 
-def _macd_agrees(close, kind):
+def _complete_bars(close, minutes):
+    """Combine 5m closes into longer bars, keeping only bars with all of their 5m bars."""
+    grouped = close.resample(f"{minutes}min")
+    return grouped.last()[grouped.count() == minutes // BAR_MINUTES]
+
+
+def _last_macd_cross(close, minutes):
+    """(close time of the latest MACD/signal cross, whether MACD is now above signal), or None if no cross."""
     macd = ema(close, 12) - ema(close, 26)
-    signal = ema(macd, 9)
-    return macd.iloc[-1] < signal.iloc[-1] if kind == "put" else macd.iloc[-1] > signal.iloc[-1]
+    above = macd > ema(macd, 9)
+    crossed = above.iloc[MACD_WARMUP_BARS:][above.iloc[MACD_WARMUP_BARS:] != above.shift().iloc[MACD_WARMUP_BARS:]]
+    if crossed.empty:
+        return None
+    return crossed.index[-1] + pd.Timedelta(minutes=minutes), bool(above.iloc[-1])
+
+
+def crosses_in_sequence(t5, t10, t15, now):
+    """The 5m cross came first, then the 10m, then the 15m, in one recent move."""
+    return t5 <= t10 <= t15 and t15 - t5 <= MACD_SEQUENCE_SPAN and now - t15 <= MACD_SEQUENCE_MAX_AGE
+
+
+def macd_sequence_confirmed(df, kind):
+    """MACD crossed its signal line on the 5m, then the 10m, then the 15m, and all three still agree."""
+    crosses = [_last_macd_cross(df.close if m == BAR_MINUTES else _complete_bars(df.close, m), m)
+               for m in (BAR_MINUTES, 10, 15)]
+    if any(c is None or c[1] != (kind == "call") for c in crosses):
+        return False
+    now = df.index[-1] + pd.Timedelta(minutes=BAR_MINUTES)
+    return crosses_in_sequence(crosses[0][0], crosses[1][0], crosses[2][0], now)
 
 
 def momentum_confirms(df, df_1m, kind):
-    """RSI vs its average line on the 1m, and MACD vs its signal line on the 5m and 10m, must all agree."""
+    """RSI vs its average line on the 1m agrees, and MACD has crossed on the 5m, then 10m, then 15m."""
     if len(df_1m) < MIN_RSI_BARS:
         return False  # not enough 1-minute bars for a reliable RSI, so don't treat it as agreement
-    grouped = df.close.resample("10min")
-    complete = grouped.last()[grouped.count() == 2]
-    return bool(_rsi_agrees(df_1m.close, kind) and _macd_agrees(df.close, kind) and _macd_agrees(complete, kind))
+    return bool(_rsi_agrees(df_1m.close, kind) and macd_sequence_confirmed(df, kind))
 
 
 def _fetch_bars(stock_client, symbol, minutes, days):
