@@ -15,7 +15,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import run_bot
-from options_bot import bot, config, contracts, price_action as pa
+from options_bot import bot, contracts, price_action as pa
 from options_bot.approval import ask_yes_no
 from options_bot.broker import Broker
 from options_bot.profit_lock import ProfitLocks
@@ -347,43 +347,22 @@ class ZoneExits(unittest.TestCase):
             bot.manage_exits(broker, s, quiet)
         self.assertEqual((closed, sold), ([], []))
 
-    def test_trade3_uses_the_dollar_stop_at_market(self):
-        self.assertIs(bot.ZONES.take_profit, bot.zone_lock_exit)
+    def test_trade3_takes_profit_at_market(self):
+        self.assertIs(bot.ZONES.take_profit, bot.zone_take_profit)
         self.assertTrue(bot.ZONES.take_profit_at_market)
         self.assertIs(bot.PRICE_ACTION.take_profit, bot.profit_lock_exit)
 
-    def lock_reason(self, symbol, pl):
-        s = SimpleNamespace(zone_lock_dollars=20.0, zone_lock_by_ticker={"SOFI": 10.0})
-        return bot.zone_lock_exit(SimpleNamespace(symbol=symbol, unrealized_pl=str(pl)), s)
+    def test_takes_profit_from_twenty_percent_up(self):
+        s = SimpleNamespace(zone_take_profit_pct=0.20)
+        def reason(plpc):
+            return bot.zone_take_profit(SimpleNamespace(unrealized_plpc=plpc), s)
+        self.assertIsNone(reason("0.19"))
+        self.assertIsNone(reason("-0.40"))
+        self.assertEqual(reason("0.20"), "take profit +20%")
+        self.assertEqual(reason("0.75"), "take profit +75%")
 
-    def test_twenty_dollar_stop_runs_above_and_sells_on_the_way_back(self):
-        spy = "SPY261109C00750000"
-        with patch.object(bot, "PROFIT_LOCKS", ProfitLocks(Path(tempfile.mkdtemp()) / "l.json")):
-            self.assertIsNone(self.lock_reason(spy, 19))
-            self.assertIsNone(self.lock_reason(spy, 20))  # never above $20, so no stop yet
-            self.assertIsNone(self.lock_reason(spy, 70))
-            self.assertIsNone(self.lock_reason(spy, 500))  # no cap
-            self.assertEqual(self.lock_reason(spy, 20), "profit lock $+20.00")
-
-    def test_sofi_uses_ten_dollars(self):
-        sofi = "SOFI261106C00016000"
-        with patch.object(bot, "PROFIT_LOCKS", ProfitLocks(Path(tempfile.mkdtemp()) / "l.json")):
-            self.assertIsNone(self.lock_reason(sofi, 24))
-            self.assertIsNone(self.lock_reason(sofi, 10.01))
-            self.assertEqual(self.lock_reason(sofi, 10), "profit lock $+10.00")
-
-    def test_a_drop_past_the_stop_still_sells(self):
-        sofi = "SOFI261106C00016000"
-        with patch.object(bot, "PROFIT_LOCKS", ProfitLocks(Path(tempfile.mkdtemp()) / "l.json")):
-            self.assertIsNone(self.lock_reason(sofi, 24))
-            self.assertEqual(self.lock_reason(sofi, -3), "profit lock $-3.00")
-
-    def test_stops_default_to_twenty_and_sofi_ten(self):
-        s = Settings()
-        self.assertEqual((s.zone_lock_dollars, s.zone_lock_by_ticker), (20.0, {"SOFI": 10.0}))
-
-    def test_ticker_stops_can_be_set_in_the_environment(self):
-        self.assertEqual(config._dollars_by_ticker("sofi=10, KO=5"), {"SOFI": 10.0, "KO": 5.0})
+    def test_default_take_profit_is_twenty_percent(self):
+        self.assertEqual(Settings().zone_take_profit_pct, 0.20)
 
     def test_position_without_levels_still_gets_the_profit_lock(self):
         closed = []

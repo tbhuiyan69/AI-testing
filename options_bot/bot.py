@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .approval import ask_yes_no
-from .broker import days_to_expiry, parse_occ
+from .broker import days_to_expiry
 from .contracts import pick_capped_contract, pick_contract
 from .price_action import expiry_day_exit, price_action_signal
 from .profit_lock import ProfitLocks
@@ -51,19 +51,9 @@ def short_dte_stop_loss(s):
     return s.short_dte_stop_loss_pct
 
 
-def zone_lock_exit(p, s):
-    """No profit cap: once profit passes the ticker's dollar stop, sell only if it falls back to it."""
-    root, _ = parse_occ(p.symbol)
-    stop = s.zone_lock_by_ticker.get(root, s.zone_lock_dollars)
-    pl = float(p.unrealized_pl or 0)
-    if pl > stop:
-        if not PROFIT_LOCKS.is_locked(p.symbol):
-            PROFIT_LOCKS.lock(p.symbol)
-            log.info("PROFIT LOCK %s at $%.2f profit; will sell if it falls to $%.2f", p.symbol, pl, stop)
-        return None
-    if PROFIT_LOCKS.is_locked(p.symbol):
-        return f"profit lock ${pl:+.2f}"
-    return None
+def zone_take_profit(p, s):
+    plpc = float(p.unrealized_plpc or 0)
+    return f"take profit {plpc:+.0%}" if plpc >= s.zone_take_profit_pct else None
 
 
 def sma_signal(broker, symbol, s):
@@ -93,7 +83,7 @@ PRICE_ACTION = Strategy(price_action_signal, pick_capped_contract, expiry_day_ex
                         time_exit_at_market=True, show_blocked=True, take_profit=profit_lock_exit,
                         take_profit_at_market=True, confirm_buys=True, stop_loss=short_dte_stop_loss)
 ZONES = Strategy(zone_signal, pick_capped_contract, expiry_day_exit, time_exit_at_market=True,
-                 show_blocked=True, take_profit=zone_lock_exit, take_profit_at_market=True, confirm_buys=True,
+                 show_blocked=True, take_profit=zone_take_profit, take_profit_at_market=True, confirm_buys=True,
                  stop_loss=short_dte_stop_loss, level_exit=zone_level_exit, after_buy=remember_levels,
                  before_cycle=opening_check, auto_any_price=True)
 
