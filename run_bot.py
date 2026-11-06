@@ -5,7 +5,7 @@
     python run_bot.py --trade           # loop and submit real PAPER orders
     python run_bot.py --trade2 --auto   # same, but contracts under $100 each buy without asking
     python run_bot.py --trade3          # zone test + close outside; asks yes/no before each PAPER buy
-    python run_bot.py --trade3 --auto   # same, but contracts under $100 each buy without asking
+    python run_bot.py --trade3 --auto   # same, but every target buys right away without asking
     python run_bot.py --dry3            # zone test + close outside, dry-run (no orders)
     python run_bot.py --dry2            # price-action patterns on 5m bars, dry-run (no orders)
     python run_bot.py --trade2          # price-action patterns; asks yes/no before each PAPER buy
@@ -20,6 +20,7 @@ from options_bot.bot import PRICE_ACTION, SMA, ZONES, run_cycle
 from options_bot.broker import Broker
 from options_bot.config import Settings
 from options_bot.price_action import BAR_MINUTES
+from options_bot.single_instance import acquire_single_instance
 
 
 def setup_logging():
@@ -61,7 +62,7 @@ def main():
     mode.add_argument("--dry2", action="store_true", help="price-action strategy: log only, no orders")
     mode.add_argument("--trade3", action="store_true", help="zone strategy: ask yes/no, then submit buys to the paper account")
     mode.add_argument("--dry3", action="store_true", help="zone strategy: log only, no orders")
-    ap.add_argument("--auto", action="store_true", help="with --trade2 or --trade3: buy without asking if one contract costs under $100; otherwise ask")
+    ap.add_argument("--auto", action="store_true", help="with --trade3: buy every target without asking; with --trade2: only if one contract costs under $100")
     ap.add_argument("--skip-rsi-macd", action="store_true", help="with --trade2 or --dry2: ignore the RSI/MACD check for this run")
     ap.add_argument("--once", action="store_true", help="run a single cycle, even if the market is closed")
     args = ap.parse_args()
@@ -69,6 +70,10 @@ def main():
         ap.error("--auto only works with --trade2 or --trade3")
     if args.skip_rsi_macd and not (args.trade2 or args.dry2):
         ap.error("--skip-rsi-macd only works with --trade2 or --dry2")
+
+    if (args.trade or args.trade2 or args.trade3) and not acquire_single_instance():
+        raise SystemExit("Another trading bot is already running on this PC, so this one did not start. "
+                         "Stop the other one first, or leave it running.")
 
     setup_logging()
     log = logging.getLogger("bot")

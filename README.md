@@ -31,6 +31,8 @@ The bot buys 1 contract per trade (`BOT_MAX_CONTRACTS`), and skips a contract co
 
 Bot sells are sent as sell-to-close, so Alpaca rejects one that would open a short position.
 
+Only one order-placing bot (`--trade`, `--trade2`, `--trade3`) can run on a PC at a time; a second copy exits straight away. Dry runs aren't limited.
+
 All numbers are configurable; see `bot.env.example` (copy to `.env`).
 
 ## Price-action strategy (`--dry2`, `--trade2`)
@@ -55,9 +57,9 @@ The pattern's stop level is logged with the order but not enforced. The detector
 1. **Zones** on 5-minute bars: each swing high (body top to wick high) and swing low (wick low to body bottom).
 2. **Touch**: price comes back into a zone within the last 12 bars.
 3. **Close outside**: another candle is the first to close outside it, in that direction. Above the zone buys a call, below it buys a put.
-4. **Exits**, checked each minute: the stock reaching the zone stop or target sells at market. The target is the next zone if it's at least 1.5R away, otherwise 2R. The -50% option stop and 3:15 PM expiry-day exit also apply.
+4. **Exits**, checked each minute: the stock reaching the zone stop or target sells at market. The target is the next zone if it's at least 1.5R away, otherwise 2R. Every open position also has a profit stop of $20, or $10 for SOFI (`BOT_ZONE_LOCK_DOLLARS`, `BOT_ZONE_LOCK_BY_TICKER`): once its profit passes that, it keeps running with no cap and sells at market if it falls back to that amount. The -50% option stop and 3:15 PM expiry-day exit apply too.
 
-Contracts, price limits, the 1-contract limit and yes/no approval are the same as `--trade2`. RSI, MACD and the put/call ratio are not used.
+Contracts, price limits and the 1-contract limit are the same as `--trade2`. RSI, MACD and the put/call ratio are not used. With `--auto`, every target buys right away with no question, as a limit order at the mid that is never re-priced higher.
 
 **Opening trade:** just after 9:31 AM ET each day, once per run, a ticker qualifies if its premarket price is at least 1% above the previous close and its first 1-minute candle is green, closes above the premarket high, closes near its high and has a range of at least 0.3%. The bot immediately buys 1 call at the ask, costing under $50, with no yes/no question, and sells at market at +20% or -20%. The 3:15 PM expiry-day exit still applies.
 

@@ -31,6 +31,12 @@ def _list(raw):
     return [s.strip().upper() for s in str(raw).split(",") if s.strip()]
 
 
+def _dollars_by_ticker(raw):
+    """Parse "SOFI=10,KO=5" into {"SOFI": 10.0, "KO": 5.0}."""
+    pairs = (item.split("=") for item in str(raw).split(",") if item.strip())
+    return {ticker.strip().upper(): float(amount) for ticker, amount in pairs}
+
+
 @dataclass
 class Settings:
     api_key: str = field(default_factory=lambda: _env("ALPACA_API_KEY", ""))
@@ -64,6 +70,8 @@ class Settings:
     auto_approve: bool = False  # set by run_bot.py --auto; applies to contracts costing under auto_approve_below
     auto_approve_below: float = field(default_factory=lambda: _env("BOT_AUTO_APPROVE_BELOW", 100.0, float))
     approval_seconds: int = field(default_factory=lambda: _env("BOT_APPROVAL_SECONDS", 60, int))
+    zone_lock_dollars: float = field(default_factory=lambda: _env("BOT_ZONE_LOCK_DOLLARS", 20.0, float))
+    zone_lock_by_ticker: dict = field(default_factory=lambda: _env("BOT_ZONE_LOCK_BY_TICKER", {"SOFI": 10.0}, _dollars_by_ticker))
     profit_lock_dollars: float = field(default_factory=lambda: _env("BOT_PROFIT_LOCK_DOLLARS", 5.0, float))
 
     # Loop

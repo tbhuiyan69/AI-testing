@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .approval import ask_yes_no
-from .broker import days_to_expiry
+from .broker import days_to_expiry, parse_occ
 from .contracts import pick_capped_contract, pick_contract
 from .price_action import expiry_day_exit, price_action_signal
 from .profit_lock import ProfitLocks
@@ -51,6 +51,21 @@ def short_dte_stop_loss(s):
     return s.short_dte_stop_loss_pct
 
 
+def zone_lock_exit(p, s):
+    """No profit cap: once profit passes the ticker's dollar stop, sell only if it falls back to it."""
+    root, _ = parse_occ(p.symbol)
+    stop = s.zone_lock_by_ticker.get(root, s.zone_lock_dollars)
+    pl = float(p.unrealized_pl or 0)
+    if pl > stop:
+        if not PROFIT_LOCKS.is_locked(p.symbol):
+            PROFIT_LOCKS.lock(p.symbol)
+            log.info("PROFIT LOCK %s at $%.2f profit; will sell if it falls to $%.2f", p.symbol, pl, stop)
+        return None
+    if PROFIT_LOCKS.is_locked(p.symbol):
+        return f"profit lock ${pl:+.2f}"
+    return None
+
+
 def sma_signal(broker, symbol, s):
     kind, price = signal_for(broker.stocks, symbol, s)
     return kind, price, f"{symbol} SMA{s.fast_sma}/{s.slow_sma} cross -> {kind}"
@@ -70,6 +85,7 @@ class Strategy:
     level_exit: Callable | None = None
     after_buy: Callable | None = None
     before_cycle: Callable | None = None
+    auto_any_price: bool = False  # with --auto, skip the question at any price
 
 
 SMA = Strategy(sma_signal, pick_contract, dte_exit)
@@ -77,9 +93,9 @@ PRICE_ACTION = Strategy(price_action_signal, pick_capped_contract, expiry_day_ex
                         time_exit_at_market=True, show_blocked=True, take_profit=profit_lock_exit,
                         take_profit_at_market=True, confirm_buys=True, stop_loss=short_dte_stop_loss)
 ZONES = Strategy(zone_signal, pick_capped_contract, expiry_day_exit, time_exit_at_market=True,
-                 show_blocked=True, take_profit=no_take_profit, confirm_buys=True,
+                 show_blocked=True, take_profit=zone_lock_exit, take_profit_at_market=True, confirm_buys=True,
                  stop_loss=short_dte_stop_loss, level_exit=zone_level_exit, after_buy=remember_levels,
-                 before_cycle=opening_check)
+                 before_cycle=opening_check, auto_any_price=True)
 
 
 def manage_exits(broker, s, strategy):
@@ -132,7 +148,7 @@ def confirm_and_buy(broker, s, targets, open_count, strategy):
             return
         contract_cost = limit * 100
         question = f"BUY {qty} x {cand.symbol} at {limit:.2f}, cost ${contract_cost * qty:,.2f}?"
-        auto = s.auto_approve and contract_cost < s.auto_approve_below
+        auto = s.auto_approve and (strategy.auto_any_price or contract_cost < s.auto_approve_below)
         if broker.live_orders and not auto and not ask_yes_no(question, s.approval_seconds):
             log.info("NOT APPROVED %s", cand.symbol)
             continue

@@ -1,4 +1,5 @@
 """Run with: python -m unittest discover tests"""
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,7 +14,8 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from options_bot import bot, contracts, price_action as pa
+import run_bot
+from options_bot import bot, config, contracts, price_action as pa
 from options_bot.approval import ask_yes_no
 from options_bot.broker import Broker
 from options_bot.profit_lock import ProfitLocks
@@ -345,6 +347,60 @@ class ZoneExits(unittest.TestCase):
             bot.manage_exits(broker, s, quiet)
         self.assertEqual((closed, sold), ([], []))
 
+    def test_trade3_uses_the_dollar_stop_at_market(self):
+        self.assertIs(bot.ZONES.take_profit, bot.zone_lock_exit)
+        self.assertTrue(bot.ZONES.take_profit_at_market)
+        self.assertIs(bot.PRICE_ACTION.take_profit, bot.profit_lock_exit)
+
+    def lock_reason(self, symbol, pl):
+        s = SimpleNamespace(zone_lock_dollars=20.0, zone_lock_by_ticker={"SOFI": 10.0})
+        return bot.zone_lock_exit(SimpleNamespace(symbol=symbol, unrealized_pl=str(pl)), s)
+
+    def test_twenty_dollar_stop_runs_above_and_sells_on_the_way_back(self):
+        spy = "SPY261109C00750000"
+        with patch.object(bot, "PROFIT_LOCKS", ProfitLocks(Path(tempfile.mkdtemp()) / "l.json")):
+            self.assertIsNone(self.lock_reason(spy, 19))
+            self.assertIsNone(self.lock_reason(spy, 20))  # never above $20, so no stop yet
+            self.assertIsNone(self.lock_reason(spy, 70))
+            self.assertIsNone(self.lock_reason(spy, 500))  # no cap
+            self.assertEqual(self.lock_reason(spy, 20), "profit lock $+20.00")
+
+    def test_sofi_uses_ten_dollars(self):
+        sofi = "SOFI261106C00016000"
+        with patch.object(bot, "PROFIT_LOCKS", ProfitLocks(Path(tempfile.mkdtemp()) / "l.json")):
+            self.assertIsNone(self.lock_reason(sofi, 24))
+            self.assertIsNone(self.lock_reason(sofi, 10.01))
+            self.assertEqual(self.lock_reason(sofi, 10), "profit lock $+10.00")
+
+    def test_a_drop_past_the_stop_still_sells(self):
+        sofi = "SOFI261106C00016000"
+        with patch.object(bot, "PROFIT_LOCKS", ProfitLocks(Path(tempfile.mkdtemp()) / "l.json")):
+            self.assertIsNone(self.lock_reason(sofi, 24))
+            self.assertEqual(self.lock_reason(sofi, -3), "profit lock $-3.00")
+
+    def test_stops_default_to_twenty_and_sofi_ten(self):
+        s = Settings()
+        self.assertEqual((s.zone_lock_dollars, s.zone_lock_by_ticker), (20.0, {"SOFI": 10.0}))
+
+    def test_ticker_stops_can_be_set_in_the_environment(self):
+        self.assertEqual(config._dollars_by_ticker("sofi=10, KO=5"), {"SOFI": 10.0, "KO": 5.0})
+
+    def test_position_without_levels_still_gets_the_profit_lock(self):
+        closed = []
+        s = SimpleNamespace(short_dte_stop_loss_pct=0.50, profit_lock_dollars=5.0)
+        strategy = bot.Strategy(bot.ZONES.signal, bot.ZONES.pick, lambda *_: None, take_profit=bot.profit_lock_exit,
+                                take_profit_at_market=True, stop_loss=bot.short_dte_stop_loss,
+                                level_exit=lambda *_: None)
+        def run(pl):
+            position = SimpleNamespace(symbol=self.CALL, unrealized_plpc="0.10", unrealized_pl=str(pl))
+            broker = SimpleNamespace(option_positions=lambda: [position], close_now=lambda _, why: closed.append(why))
+            bot.manage_exits(broker, s, strategy)
+        with patch.object(bot, "PROFIT_LOCKS", ProfitLocks(Path(tempfile.mkdtemp()) / "l.json")):
+            run(12)
+            self.assertEqual(closed, [])
+            run(5)
+        self.assertEqual(closed, ["profit lock $+5.00"])
+
     def test_option_stop_still_applies(self):
         sold = []
         position = SimpleNamespace(symbol=self.CALL, unrealized_plpc="-0.50", unrealized_pl="-50")
@@ -448,6 +504,68 @@ class OpeningTrade(unittest.TestCase):
         b._submit = lambda symbol, qty, side, limit, reason: sent.append(limit)
         b.buy(SimpleNamespace(symbol="X", ask=0.45, mid=0.40), "why", at_ask=True)
         self.assertEqual(sent, [0.45])
+
+
+HOLD_LOCK = """
+import sys, time
+sys.path.insert(0, {root!r})
+from options_bot.single_instance import acquire_single_instance
+print("got" if acquire_single_instance({path!r}) else "refused", flush=True)
+time.sleep({hold})
+"""
+
+
+class SingleInstance(unittest.TestCase):
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.path = str(Path(d.name) / "bot.lock")
+        self.root = str(Path(__file__).resolve().parent.parent)
+
+    def start(self, hold):
+        code = HOLD_LOCK.format(root=self.root, path=self.path, hold=hold)
+        return subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+
+    def test_second_process_is_refused_until_the_first_ends(self):
+        first = self.start(hold=30)
+        self.addCleanup(first.stdout.close)
+        self.addCleanup(first.wait)
+        self.addCleanup(first.kill)
+        self.assertEqual(first.stdout.readline().strip(), "got")
+
+        second = self.start(hold=0)
+        self.assertEqual(second.communicate(timeout=20)[0].strip(), "refused")
+
+        first.kill()  # a crash or a closed terminal must release it too
+        first.wait()
+        third = self.start(hold=0)
+        self.assertEqual(third.communicate(timeout=20)[0].strip(), "got")
+
+    def run_main(self, *flags, acquired):
+        with (patch.object(sys, "argv", ["run_bot.py", *flags]),
+              patch.object(run_bot, "acquire_single_instance", return_value=acquired) as acquire,
+              patch.object(run_bot, "Broker", side_effect=AssertionError("reached the broker")),
+              patch.object(run_bot, "setup_logging")):
+            try:
+                run_bot.main()
+            except (SystemExit, AssertionError) as e:
+                return acquire, e
+        return acquire, None
+
+    def test_order_placing_modes_stop_before_touching_the_broker(self):
+        for flag in ("--trade", "--trade2", "--trade3"):
+            with self.subTest(flag):
+                acquire, outcome = self.run_main(flag, acquired=False)
+                acquire.assert_called_once()
+                self.assertIsInstance(outcome, SystemExit)
+                self.assertIn("already running", str(outcome))
+
+    def test_dry_runs_do_not_take_the_lock(self):
+        for flags in ((), ("--dry2",), ("--dry3",)):
+            with self.subTest(flags):
+                acquire, outcome = self.run_main(*flags, acquired=False)
+                acquire.assert_not_called()
+                self.assertIsInstance(outcome, AssertionError)
 
 
 class FakeBroker:
@@ -765,14 +883,14 @@ class ApprovalBroker:
 
 
 class ApprovingBuys(unittest.TestCase):
-    def run_entries(self, broker, answers, max_open=3, auto=False):
+    def run_entries(self, broker, answers, max_open=3, auto=False, any_price=False):
         symbols = ["AAA", "BBB", "CCC"]
         s = SimpleNamespace(watchlist=symbols, max_open_positions=max_open, approval_seconds=60, auto_approve=auto,
                             auto_approve_below=100.0)
         pick = lambda _t, _o, sym, *_: (
             Candidate(sym + "CONTRACT", 100.0, date.today() + timedelta(days=3), 1.08, 1.12, 0.3), None)
         strategy = bot.Strategy(signal=lambda _b, sym, _s: ("call", 100.0, f"{sym} setup"), pick=pick,
-                                time_exit=lambda *_: None, confirm_buys=True)
+                                time_exit=lambda *_: None, confirm_buys=True, auto_any_price=any_price)
         with patch.object(bot, "ask_yes_no", side_effect=answers) as ask:
             bot.look_for_entries(broker, s, strategy)
         return ask
@@ -815,6 +933,21 @@ class ApprovingBuys(unittest.TestCase):
                 ask = self.run_entries(broker, [False, False, False], auto=True)
                 self.assertEqual(ask.call_count, 3)
                 self.assertEqual(broker.bought, [])
+
+    def test_any_price_strategy_buys_over_the_limit_without_asking(self):
+        broker = ApprovalBroker(qty=1, limit=1.50)
+        ask = self.run_entries(broker, [], auto=True, any_price=True)
+        self.assertEqual(ask.call_count, 0)
+        self.assertEqual(len(broker.bought), 3)
+
+    def test_any_price_strategy_still_asks_without_auto(self):
+        broker = ApprovalBroker(qty=1, limit=1.50)
+        ask = self.run_entries(broker, [False, False, False], any_price=True)
+        self.assertEqual(ask.call_count, 3)
+
+    def test_only_trade3_buys_at_any_price(self):
+        self.assertTrue(bot.ZONES.auto_any_price)
+        self.assertFalse(bot.PRICE_ACTION.auto_any_price)
 
     def test_auto_still_respects_the_position_limit(self):
         broker = ApprovalBroker(positions=2, qty=1, limit=0.50)
