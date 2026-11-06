@@ -380,6 +380,36 @@ class ZoneExits(unittest.TestCase):
             run(5)
         self.assertEqual(closed, ["profit lock $+5.00"])
 
+    def stopped(self, days_out, plpc):
+        closed, sold = [], []
+        symbol = f"AAA{(date.today() + timedelta(days=days_out)):%y%m%d}C00100000"
+        position = SimpleNamespace(symbol=symbol, unrealized_plpc=plpc, unrealized_pl="0")
+        broker = SimpleNamespace(option_positions=lambda: [position], close_now=lambda _, why: closed.append(why),
+                                 sell=lambda _, why: sold.append(why))
+        s = SimpleNamespace(zone_stop_0dte_pct=0.20, zone_stop_pct=0.40, zone_take_profit_pct=0.20)
+        morning = pd.Timestamp(f"{date.today()} 10:00", tz="America/New_York")
+        with (patch.object(bot, "PROFIT_LOCKS", ProfitLocks(Path(tempfile.mkdtemp()) / "l.json")),
+              patch.object(zs, "ZONE_LEVELS", ZoneLevels(self.path)), patch.object(pd.Timestamp, "now", return_value=morning)):
+            bot.manage_exits(broker, s, bot.ZONES)
+        self.assertEqual(sold, [])
+        return closed
+
+    def test_same_day_contract_sells_at_market_at_minus_twenty(self):
+        self.assertEqual(self.stopped(0, "-0.19"), [])
+        self.assertEqual(self.stopped(0, "-0.20"), ["stop loss -20%"])
+
+    def test_longer_contract_holds_until_minus_forty(self):
+        for days_out in (1, 3, 5):
+            with self.subTest(days_out):
+                self.assertEqual(self.stopped(days_out, "-0.20"), [])
+                self.assertEqual(self.stopped(days_out, "-0.39"), [])
+                self.assertEqual(self.stopped(days_out, "-0.40"), ["stop loss -40%"])
+
+    def test_take_profit_at_twenty_applies_to_both(self):
+        for days_out in (0, 3):
+            with self.subTest(days_out):
+                self.assertEqual(self.stopped(days_out, "0.20"), ["take profit +20%"])
+
     def test_option_stop_still_applies(self):
         sold = []
         position = SimpleNamespace(symbol=self.CALL, unrealized_plpc="-0.50", unrealized_pl="-50")

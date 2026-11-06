@@ -43,11 +43,15 @@ def no_take_profit(p, s):
     return None
 
 
-def default_stop_loss(s):
+def default_stop_loss(s, dte):
     return s.stop_loss_pct
 
 
-def short_dte_stop_loss(s):
+def zone_stop_loss(s, dte):
+    return s.zone_stop_0dte_pct if dte == 0 else s.zone_stop_pct
+
+
+def short_dte_stop_loss(s, dte):
     return s.short_dte_stop_loss_pct
 
 
@@ -72,6 +76,7 @@ class Strategy:
     take_profit_at_market: bool = False
     confirm_buys: bool = False
     stop_loss: Callable = default_stop_loss
+    stop_loss_at_market: bool = False
     level_exit: Callable | None = None
     after_buy: Callable | None = None
     before_cycle: Callable | None = None
@@ -84,7 +89,7 @@ PRICE_ACTION = Strategy(price_action_signal, pick_capped_contract, expiry_day_ex
                         take_profit_at_market=True, confirm_buys=True, stop_loss=short_dte_stop_loss)
 ZONES = Strategy(zone_signal, pick_capped_contract, expiry_day_exit, time_exit_at_market=True,
                  show_blocked=True, take_profit=zone_take_profit, take_profit_at_market=True, confirm_buys=True,
-                 stop_loss=short_dte_stop_loss, level_exit=zone_level_exit, after_buy=remember_levels,
+                 stop_loss=zone_stop_loss, stop_loss_at_market=True, level_exit=zone_level_exit, after_buy=remember_levels,
                  before_cycle=opening_check, auto_any_price=True)
 
 
@@ -112,8 +117,8 @@ def exit_position(broker, s, strategy, p):
         broker.close_now(p, take_profit)
     elif take_profit:
         broker.sell(p, take_profit)
-    elif plpc <= -strategy.stop_loss(s):
-        broker.sell(p, f"stop loss {plpc:+.0%}")
+    elif plpc <= -strategy.stop_loss(s, dte):
+        (broker.close_now if strategy.stop_loss_at_market else broker.sell)(p, f"stop loss {plpc:+.0%}")
     elif time_exit:
         broker.sell(p, time_exit)
     else:

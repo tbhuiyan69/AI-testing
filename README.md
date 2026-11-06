@@ -57,7 +57,7 @@ The pattern's stop level is logged with the order but not enforced. The detector
 1. **Zones** on 5-minute bars: each swing high (body top to wick high) and swing low (wick low to body bottom).
 2. **Touch**: price comes back into a zone within the last 12 bars.
 3. **Close outside**: another candle is the first to close outside it, in that direction. Above the zone buys a call, below it buys a put.
-4. **Exits**, checked each minute: the stock reaching the zone stop or target sells at market. The target is the next zone if it's at least 1.5R away, otherwise 2R. Every open position also sells at market once it's up 20% (`BOT_ZONE_TAKE_PROFIT_PCT`). The -50% option stop and 3:15 PM expiry-day exit apply too.
+4. **Exits**, checked each minute: the stock reaching the zone stop or target sells at market. The target is the next zone if it's at least 1.5R away, otherwise 2R. Every open position also sells at market once it's up 20% (`BOT_ZONE_TAKE_PROFIT_PCT`). The stop loss sells at market at -20% on the expiry day and -40% otherwise (`BOT_ZONE_STOP_0DTE_PCT`, `BOT_ZONE_STOP_PCT`), and the 3:15 PM expiry-day exit applies too.
 
 Contracts, price limits and the 1-contract limit are the same as `--trade2`. RSI, MACD and the put/call ratio are not used. With `--auto`, every target buys right away with no question, as a limit order at the mid that is never re-priced higher.
 
