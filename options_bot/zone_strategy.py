@@ -11,13 +11,16 @@ import logging
 import os
 import time as clock
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
+import pandas as pd
 from alpaca.data.enums import DataFeed
-from alpaca.data.requests import StockLatestTradeRequest
+from alpaca.data.requests import StockBarsRequest, StockLatestTradeRequest
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from .broker import OCC_RE, parse_occ
+from .contracts import MAX_CAPPED_DTE, _closest_to_target, meets_min_delta, quote_contracts
 from .price_action import STALE_MINUTES, _atr, fetch_5m
 
 log = logging.getLogger("bot")
@@ -132,6 +135,13 @@ class ZoneLevels:
         today = date.today()
         self.levels = {c: v for c, v in self.levels.items() if (parse_occ(c)[1] or today) >= today}
         self.levels[contract] = {"kind": kind, "stop": stop, "target": target}
+        self._save()
+
+    def set_opening(self, contract):
+        self.levels[contract] = {"kind": "opening"}
+        self._save()
+
+    def _save(self):
         tmp = self.path.with_suffix(f".{os.getpid()}.tmp")
         for attempt in range(3):
             try:
@@ -182,6 +192,8 @@ def zone_level_exit(broker, p, s):
     levels = ZONE_LEVELS.get(p.symbol)
     if not levels:
         return None
+    if levels["kind"] == "opening":
+        return opening_exit(p)
     root, _ = parse_occ(p.symbol)
     try:
         req = StockLatestTradeRequest(symbol_or_symbols=root, feed=DataFeed.IEX)
@@ -194,4 +206,104 @@ def zone_level_exit(broker, p, s):
         return f"zone stop, {root} {price:.2f}"
     if (price >= levels["target"]) if is_call else (price <= levels["target"]):
         return f"zone target, {root} {price:.2f}"
+    return None
+
+
+@dataclass(frozen=True)
+class OpeningConfig:
+    min_gap: float = 0.01  # premarket price at least this far above the previous close
+    min_body_of_range: float = 0.60  # candle closes near its high, with little wick
+    min_range: float = 0.003  # the candle's high-low range, as a fraction of its open
+    max_contract_cost: float = 50.0  # one contract must cost less than this
+    take_profit_pct: float = 0.20
+    stop_loss_pct: float = 0.20
+    first_check: time = time(9, 31)
+    last_check: time = time(9, 40)
+
+
+def fetch_extended_1m(stock_client, symbol, days=5):
+    """Closed 1-minute bars including premarket, indexed in US/Eastern."""
+    now = datetime.now(timezone.utc)
+    req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+                           start=now - timedelta(days=days), feed=DataFeed.IEX)
+    df = stock_client.get_stock_bars(req).df
+    if df.empty:
+        return df
+    df = df.xs(symbol, level="symbol").tz_convert("America/New_York")
+    return df[df.index + pd.Timedelta(minutes=1) <= now]
+
+
+def opening_signal(df, day, cfg=OpeningConfig()):
+    """Why this day's first 1-minute candle qualifies, or None. Premarket up, then an aggressive green candle."""
+    if df.empty:
+        return None
+    today = df[df.index.date == day]
+    earlier = df[df.index.date < day].between_time("09:30", "15:59")
+    premarket = today.between_time("04:00", "09:29")
+    first = today[today.index.time == time(9, 30)]
+    if earlier.empty or premarket.empty or first.empty:
+        return None
+    previous_close = float(earlier.close.iloc[-1])
+    premarket_high = float(premarket.high.max())
+    gap = float(premarket.close.iloc[-1]) / previous_close - 1
+    bar = first.iloc[0]
+    candle_range = bar.high - bar.low
+    if (gap < cfg.min_gap or bar.close <= bar.open or bar.close <= premarket_high or candle_range <= 0
+            or (bar.close - bar.open) / candle_range < cfg.min_body_of_range
+            or candle_range / bar.open < cfg.min_range):
+        return None
+    return f"premarket {gap:+.1%}, high {premarket_high:.2f}, first minute {bar.open:.2f} to {bar.close:.2f}"
+
+
+def pick_opening_contract(broker, symbol, price, s, cfg=OpeningConfig()):
+    """The call closest to the target delta that costs under the limit at the ask, or None."""
+    candidates = quote_contracts(broker.trading, broker.options, symbol, "call", price, 0, MAX_CAPPED_DTE, 0.10,
+                                 s.min_open_interest, s.max_spread_pct)
+    allowed = [c for c in candidates if c.ask * 100 < cfg.max_contract_cost and meets_min_delta(c)]
+    return _closest_to_target(allowed, price, s) if allowed else None
+
+
+_opening_done = {"day": None}
+
+
+def opening_check(broker, s, cfg=OpeningConfig()):
+    """Once a day, just after the first 1-minute candle closes, buy calls on qualifying tickers."""
+    now = pd.Timestamp.now("America/New_York")
+    if _opening_done["day"] == now.date() or not cfg.first_check <= now.time() <= cfg.last_check:
+        return
+    _opening_done["day"] = now.date()
+    if broker.daily_loss_hit():
+        return
+    open_count = len(broker.option_positions())
+    busy = broker.busy_underlyings()
+    for symbol in s.watchlist:
+        if open_count >= s.max_open_positions:
+            log.info("OPENING: max open positions (%d) reached.", s.max_open_positions)
+            return
+        if symbol in busy:
+            continue
+        try:
+            df = fetch_extended_1m(broker.stocks, symbol)
+            reason = opening_signal(df, now.date(), cfg)
+            if not reason:
+                continue
+            cand = pick_opening_contract(broker, symbol, float(df.close.iloc[-1]), s, cfg)
+            if not cand:
+                log.info("OPENING: %s qualifies (%s) but no call costs under $%.0f", symbol, reason, cfg.max_contract_cost)
+                continue
+            broker.buy(cand, f"OPENING call, {reason}, delta {cand.delta:+.2f}", at_ask=True)
+            if broker.live_orders:
+                ZONE_LEVELS.set_opening(cand.symbol)
+            open_count += 1
+        except Exception as e:  # one bad ticker must not stop the rest
+            log.warning("OPENING: %s failed (%s)", symbol, e)
+
+
+def opening_exit(p, cfg=OpeningConfig()):
+    """Sell an opening trade at +20% or -20%."""
+    plpc = float(p.unrealized_plpc or 0)
+    if plpc >= cfg.take_profit_pct:
+        return f"opening take profit {plpc:+.0%}"
+    if plpc <= -cfg.stop_loss_pct:
+        return f"opening stop {plpc:+.0%}"
     return None

@@ -356,6 +356,100 @@ class ZoneExits(unittest.TestCase):
         self.assertEqual(sold, ["stop loss -50%"])
 
 
+def opening_bars(pre_close=102.0, pre_high=102.5, first=(102.6, 103.5, 102.5, 103.4), prev_close=100.0):
+    day, prior = date(2026, 11, 6), date(2026, 11, 5)
+    rows = [(f"{prior} 15:59", prev_close, prev_close, prev_close, prev_close),
+            (f"{day} 08:00", pre_close, pre_high, pre_close - 0.2, pre_close),
+            (f"{day} 09:29", pre_close, pre_close, pre_close, pre_close),
+            (f"{day} 09:30", *first)]
+    idx = pd.DatetimeIndex([r[0] for r in rows]).tz_localize("America/New_York")
+    return pd.DataFrame([r[1:] for r in rows], columns=["open", "high", "low", "close"], index=idx), day
+
+
+class OpeningTrade(unittest.TestCase):
+    def test_gap_up_and_aggressive_first_candle_qualifies(self):
+        df, day = opening_bars()
+        self.assertIn("premarket +2.0%", zs.opening_signal(df, day))
+
+    def test_failing_conditions_do_not_qualify(self):
+        cases = {
+            "small premarket move": dict(pre_close=100.5, pre_high=100.6, first=(100.6, 101.5, 100.5, 101.4)),
+            "red candle": dict(first=(103.4, 103.5, 102.5, 102.6)),
+            "closes below premarket high": dict(pre_high=104.0),
+            "long upper wick": dict(first=(102.6, 106.0, 102.5, 103.4)),
+            "tiny candle": dict(first=(102.60, 102.70, 102.59, 102.69), pre_high=102.5),
+        }
+        for name, kwargs in cases.items():
+            with self.subTest(name):
+                df, day = opening_bars(**kwargs)
+                self.assertIsNone(zs.opening_signal(df, day))
+
+    def test_missing_first_candle_does_not_qualify(self):
+        df, day = opening_bars()
+        self.assertIsNone(zs.opening_signal(df.iloc[:-1], day))
+
+    def test_exit_at_twenty_percent_either_way(self):
+        for plpc, expected in [("0.20", "take profit"), ("0.50", "take profit"), ("-0.20", "stop"), ("-0.60", "stop")]:
+            with self.subTest(plpc):
+                self.assertIn(expected, zs.opening_exit(SimpleNamespace(unrealized_plpc=plpc)))
+        for plpc in ("0.19", "0", "-0.19"):
+            with self.subTest(plpc):
+                self.assertIsNone(zs.opening_exit(SimpleNamespace(unrealized_plpc=plpc)))
+
+    def contract(self, ask, delta=0.30):
+        return Candidate("AAA261106C00100000", 100.0, date.today(), ask - 0.01, ask, delta)
+
+    def pick(self, candidates):
+        s = SimpleNamespace(min_open_interest=100, max_spread_pct=0.10, target_delta=0.40)
+        with patch.object(zs, "quote_contracts", return_value=candidates):
+            return zs.pick_opening_contract(SimpleNamespace(trading=None, options=None), "AAA", 100.0, s)
+
+    def test_contract_must_cost_under_fifty_dollars_at_the_ask(self):
+        cheap = self.contract(0.49)
+        self.assertIs(self.pick([self.contract(0.50), cheap]), cheap)
+        self.assertIsNone(self.pick([self.contract(0.50)]))
+        self.assertIsNone(self.pick([self.contract(0.30, delta=0.10)]))
+
+    def run_check(self, hour=9, minute=31, busy=(), positions=0, buy_contract=True):
+        zs._opening_done["day"] = None
+        self.addCleanup(zs._opening_done.update, {"day": None})
+        bought = []
+        broker = SimpleNamespace(stocks=None, live_orders=True, daily_loss_hit=lambda: False,
+                                 option_positions=lambda: [None] * positions, busy_underlyings=lambda: set(busy),
+                                 buy=lambda c, why, at_ask=False: bought.append((c.symbol, at_ask)))
+        s = SimpleNamespace(watchlist=["AAA"], max_open_positions=3)
+        now = pd.Timestamp(f"{date.today()} {hour:02d}:{minute:02d}", tz="America/New_York")
+        levels = ZoneLevels(Path(tempfile.mkdtemp()) / "levels.json")
+        with (patch.object(pd.Timestamp, "now", return_value=now), patch.object(zs, "ZONE_LEVELS", levels),
+              patch.object(zs, "fetch_extended_1m", return_value=opening_bars()[0]),
+              patch.object(zs, "opening_signal", return_value="why"),
+              patch.object(zs, "pick_opening_contract", return_value=self.contract(0.40) if buy_contract else None)):
+            zs.opening_check(broker, s)
+            zs.opening_check(broker, s)
+        return bought, levels
+
+    def test_buys_once_at_the_ask_and_saves_the_opening_exit(self):
+        bought, levels = self.run_check()
+        self.assertEqual(bought, [("AAA261106C00100000", True)])
+        self.assertEqual(levels.get("AAA261106C00100000"), {"kind": "opening"})
+
+    def test_only_runs_in_the_opening_window(self):
+        self.assertEqual(self.run_check(minute=30)[0], [])
+        self.assertEqual(self.run_check(minute=41)[0], [])
+
+    def test_respects_held_tickers_and_the_position_limit(self):
+        self.assertEqual(self.run_check(busy=["AAA"])[0], [])
+        self.assertEqual(self.run_check(positions=3)[0], [])
+
+    def test_buy_at_ask_uses_the_ask_as_the_limit(self):
+        b = Broker.__new__(Broker)
+        b.s = SimpleNamespace(max_contracts=1, max_trade_dollars=1000.0)
+        sent = []
+        b._submit = lambda symbol, qty, side, limit, reason: sent.append(limit)
+        b.buy(SimpleNamespace(symbol="X", ask=0.45, mid=0.40), "why", at_ask=True)
+        self.assertEqual(sent, [0.45])
+
+
 class FakeBroker:
     stocks = trading = options = None
 

@@ -59,5 +59,7 @@ The pattern's stop level is logged with the order but not enforced. The detector
 
 Contracts, price limits, the 1-contract limit and yes/no approval are the same as `--trade2`. RSI, MACD and the put/call ratio are not used.
 
+**Opening trade:** just after 9:31 AM ET each day, once per run, a ticker qualifies if its premarket price is at least 1% above the previous close and its first 1-minute candle is green, closes above the premarket high, closes near its high and has a range of at least 0.3%. The bot immediately buys 1 call at the ask, costing under $50, with no yes/no question, and sells at market at +20% or -20%. The 3:15 PM expiry-day exit still applies.
+
 The SMA crossover is a placeholder to exercise the plumbing, not a tested edge.
 Swap in your own logic by editing `signal_for` in `options_bot/strategy.py`.

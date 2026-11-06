@@ -67,8 +67,10 @@ class Broker:
         affordable = int(self.s.max_trade_dollars // (cand.ask * 100))
         return min(affordable, self.s.max_contracts), tick_round(cand.mid)
 
-    def buy(self, cand, reason):
+    def buy(self, cand, reason, at_ask=False):
+        """Buy at the mid, or at the ask when the entry matters more than the price."""
         qty, limit = self.order_size(cand)
+        limit = tick_round(cand.ask) if at_ask else limit
         if qty < 1:
             log.info("SKIP %s: one contract (~$%.0f) exceeds max trade size $%.0f",
                      cand.symbol, cand.ask * 100, self.s.max_trade_dollars)

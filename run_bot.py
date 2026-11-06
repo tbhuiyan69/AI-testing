@@ -39,6 +39,8 @@ def run_price_action_loop(broker, s, strategy, log):
             is_open = broker.market_open()
             if is_open:
                 bar = int(time.time() // (BAR_MINUTES * 60))
+                if strategy.before_cycle:
+                    strategy.before_cycle(broker, s)
                 run_cycle(broker, s, strategy, entries=bar != last_bar)
                 last_bar = bar
             elif was_open is not False:

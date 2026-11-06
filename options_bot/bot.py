@@ -9,7 +9,7 @@ from .contracts import pick_capped_contract, pick_contract
 from .price_action import expiry_day_exit, price_action_signal
 from .profit_lock import ProfitLocks
 from .strategy import signal_for
-from .zone_strategy import remember_levels, zone_level_exit, zone_signal
+from .zone_strategy import opening_check, remember_levels, zone_level_exit, zone_signal
 
 log = logging.getLogger("bot")
 PROFIT_LOCKS = ProfitLocks()
@@ -69,6 +69,7 @@ class Strategy:
     stop_loss: Callable = default_stop_loss
     level_exit: Callable | None = None
     after_buy: Callable | None = None
+    before_cycle: Callable | None = None
 
 
 SMA = Strategy(sma_signal, pick_contract, dte_exit)
@@ -77,7 +78,8 @@ PRICE_ACTION = Strategy(price_action_signal, pick_capped_contract, expiry_day_ex
                         take_profit_at_market=True, confirm_buys=True, stop_loss=short_dte_stop_loss)
 ZONES = Strategy(zone_signal, pick_capped_contract, expiry_day_exit, time_exit_at_market=True,
                  show_blocked=True, take_profit=no_take_profit, confirm_buys=True,
-                 stop_loss=short_dte_stop_loss, level_exit=zone_level_exit, after_buy=remember_levels)
+                 stop_loss=short_dte_stop_loss, level_exit=zone_level_exit, after_buy=remember_levels,
+                 before_cycle=opening_check)
 
 
 def manage_exits(broker, s, strategy):
